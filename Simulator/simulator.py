@@ -249,30 +249,25 @@ class TOGSimulator():
         self.base_dir = togsim_path
         self.config_path = config_path
         self.config_yaml = self.load_yaml(self.config_path)
-        self.process = None
         self._next_kernel_id = 0  # Auto-incrementing kernel ID
 
-        # Create FIFOs for command and event communication
-        self.fifo_dir = os.path.join("/tmp", f"togsim_fifo_{os.getpid()}")
-        os.makedirs(self.fifo_dir, exist_ok=True)
-        self.trace_file_path = os.path.join(self.fifo_dir, "cmd_fifo")
         self.trace_log = "# command_type, kernel_id, device_index, stream_index, tog_path, attribute_path, timestamp\n"
 
-        # Create FIFOs if they don't exist
-        if os.path.exists(self.trace_file_path):
-            os.remove(self.trace_file_path)
-        os.mkfifo(self.trace_file_path)
-
-        # Start TOGSim process
-        self._start_process()
-
-        # Open trace file FIFO once and keep it open (after process starts)
-        self._trace_file_lock = threading.Lock()
-        try:
-            self._trace_file_handle = open(self.trace_file_path, 'w')
-        except IOError as e:
-            logger.error(f"[TOGSim] Failed to open trace file: {e}")
-            raise RuntimeError(f"Failed to open trace file: {e}")
+        # Batching state -- kernels/syncs accumulate here instead of
+        # streaming to one long-lived process; see _flush_batch() for why
+        # (interchiplet's multi-round NoC convergence needs TOGSim to
+        # actually exit and restart each round, which a process Python is
+        # still actively feeding can't do without deadlocking). Each flush
+        # is a fresh, self-contained TOGSim invocation; _checkpoint_path/
+        # _ssd_trace_continue_path thread the previous flush's cycle
+        # counters/SSD trace file into the next one so they stay continuous
+        # despite each flush being a new process.
+        self._pending_batch_lines = []
+        self._checkpoint_path = None
+        self._ssd_trace_continue_path = None
+        self._last_result_path = None
+        self._batch_dir = Path(extension_config.CONFIG_TORCHSIM_LOG_PATH)
+        self._batch_dir.mkdir(parents=True, exist_ok=True)
 
     def __enter__(self):
         """Context manager entry.
@@ -301,35 +296,143 @@ class TOGSimulator():
         else:
             os.environ["TOGSIM_CONFIG"] = self._old_togsim_config_env
 
-    def _start_process(self):
-        cmd = f"{self.get_togsim_command(self.config_path, self.base_dir)} --models_list {self.trace_file_path}"
-        if extension_config.CONFIG_TOGSIM_DEBUG_LEVEL:
-            cmd += f" --log_level {extension_config.CONFIG_TOGSIM_DEBUG_LEVEL}"
+    @staticmethod
+    def _find_ssd_trace_path(log_bytes):
+        """
+        Parses "[SSD] trace enabled: <path>" out of a batch's own log (see
+        SsdTraceManager's constructor, TOGSim/src/SsdTrace.cc) to learn which
+        dma_trace_N.csv file it picked, so the *next* batch can continue
+        appending to that same file (via TOGSIM_SSD_TRACE_CONTINUE_PATH)
+        instead of starting a new numbered one. Returns None if SSD tracing
+        wasn't enabled for this batch (line never printed).
+        """
+        m = re.search(rb"\[SSD\] trace enabled: (\S+)", log_bytes)
+        return m.group(1).decode() if m else None
 
-        logger.debug(f"[TOGSim] cmd> {cmd}")
-        if self.process is None:
-            self.process = subprocess.Popen(
-                shlex.split(cmd),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                universal_newlines=True
+    def _flush_batch(self):
+        """
+        Run everything accumulated in self._pending_batch_lines since the
+        last flush through a fresh, self-contained TOGSim (or interchiplet,
+        if SSD/DRAM legosim is enabled) invocation -- structurally the same
+        shape run_standalone() already uses for one kernel (write a trace
+        file, run to completion, read back one result), just with however
+        many kernels/syncs accumulated in this batch instead of always 1.
+
+        A fresh process per batch (rather than one long-lived FIFO-fed
+        process for the whole session) is what lets TOGSIM_LEGOSIM_DRAM_NOC's
+        multi-round convergence work: interchiplet's -t N respawns every
+        phase1 process (including TOGSim) fresh each round, which only works
+        for a process that's actually expected to exit and restart -- not one
+        Python is still streaming kernels into (that deadlocks: a respawned
+        round would open a writer-less FIFO and block forever).
+
+        self._checkpoint_path/self._ssd_trace_continue_path thread the
+        previous batch's outputs into --checkpoint_in/TOGSIM_SSD_TRACE_CONTINUE_PATH
+        so TOGSim's cycle counters (Simulator::save_checkpoint/load_checkpoint,
+        TOGSim/src/Simulator.cc) and SSD trace file (SsdTraceManager::open_trace's
+        continuation mode, TOGSim/src/SsdTrace.cc) stay continuous across
+        batches despite each one being a fresh process. This is only safe
+        because a batch boundary is always a DEVICE_SYNC or until() call --
+        Simulator::cycle() runs until running() is false (every core, every
+        partition scheduler, the interconnect, and DRAM all fully drained),
+        so there's never any in-flight state left over to lose.
+        """
+        if not self._pending_batch_lines:
+            return
+
+        idx = TOGSimulator._next_result_index(self._batch_dir)
+        trace_file_path = self._batch_dir / f"{idx}.trace"
+        with open(trace_file_path, "w") as f:
+            f.write("\n".join(self._pending_batch_lines) + "\n")
+        self._pending_batch_lines = []
+
+        checkpoint_out = self._batch_dir / f"{idx}.checkpoint"
+        checkpoint_args = []
+        if self._checkpoint_path is not None:
+            checkpoint_args += ["--checkpoint_in", str(self._checkpoint_path)]
+        checkpoint_args += ["--checkpoint_out", str(checkpoint_out)]
+
+        use_legosim_ssd = extension_config.CONFIG_TOGSIM_LEGOSIM_SSD
+        use_legosim_dram = extension_config.CONFIG_TOGSIM_LEGOSIM_DRAM
+        use_dram_noc = use_legosim_dram and extension_config.CONFIG_TOGSIM_LEGOSIM_DRAM_NOC
+        core_freq_mhz = self.config_yaml["core_freq_mhz"] if use_legosim_dram else None
+
+        env_overrides = {}
+        if self._ssd_trace_continue_path is not None:
+            env_overrides["TOGSIM_SSD_TRACE_CONTINUE_PATH"] = str(self._ssd_trace_continue_path)
+
+        if use_legosim_ssd or use_legosim_dram:
+            togsim_bin = os.path.join(self.base_dir, "build/bin/Simulator")
+            run_dir = self._batch_dir / f"{idx}.legosim_run"
+            yaml_path = TOGSimulator._build_legosim_yaml(
+                togsim_bin, os.path.join(self.base_dir, self.config_path), trace_file_path, run_dir,
+                log_level=extension_config.CONFIG_TOGSIM_DEBUG_LEVEL,
+                use_ssd=use_legosim_ssd, use_dram=use_legosim_dram, use_dram_noc=use_dram_noc,
+                core_freq_mhz=core_freq_mhz, extra_togsim_args=checkpoint_args,
             )
-        else:
-            logger.warning("[TOGSim] Simulator is already running.")
+            interchiplet_bin = os.path.join(extension_config.CONFIG_LEGOSIM_ROOT, "interchiplet/bin/interchiplet")
+            rounds = extension_config.CONFIG_LEGOSIM_DRAM_NOC_ROUNDS if use_dram_noc else 1
+            cmd = f"{interchiplet_bin} {yaml_path} -w 3 -f 2 -t {rounds}"
 
-    def _cleanup_fifos(self):
-        """Clean up FIFO files"""
-        try:
-            if os.path.exists(self.trace_file_path):
-                os.remove(self.trace_file_path)
-            if os.path.exists(self.fifo_dir):
-                os.rmdir(self.fifo_dir)
-        except OSError as e:
-            logger.warning(f"[TOGSim] Failed to clean up FIFOs: {e}")
+            path_desc = "+".join(
+                p for p, on in (("SSD", use_legosim_ssd), ("DRAM", use_legosim_dram), ("NoC", use_dram_noc)) if on
+            )
+            logger.debug(f"[TOGSim] cmd> {cmd}")
+            logger.info(f"[TOGSim] TOGSim batch {idx} started (LegoSim {path_desc} path)")
+
+            env = TOGSimulator._legosim_env(
+                use_ssd=use_legosim_ssd, use_dram=use_legosim_dram, core_freq_mhz=core_freq_mhz,
+            )
+            env.update(env_overrides)
+
+            interchiplet_stdout, _ = TOGSimulator._run_interchiplet(
+                shlex.split(cmd), cwd=run_dir, env=env, timeout_sec=None,
+            )
+            phase1_basenames = ["Simulator"]
+            if use_legosim_ssd:
+                phase1_basenames.append("ssd_simlet")
+            if use_legosim_dram:
+                phase1_basenames.append("dram_simlet")
+            phase2_basenames = ["popnet"] if use_dram_noc else ["true"]
+            TOGSimulator._split_interchiplet_log(run_dir, interchiplet_stdout, phase1_basenames, phase2_basenames)
+            TOGSimulator._split_togsim_logs(run_dir)
+            # See run_standalone()'s matching comment: with use_dram_noc, TOGSim's
+            # reported cycles differ round to round (converging by the last one),
+            # so always read the last round -- never round 1.
+            pytorchsim_log = run_dir / f"proc_r{rounds}_p1_t0" / "pytorchsim.log"
+            result_bytes = pytorchsim_log.read_bytes() if pytorchsim_log.exists() else b""
+        else:
+            cmd = f"{TOGSimulator.get_togsim_command(self.config_path, self.base_dir)} --models_list {trace_file_path}"
+            cmd += " " + " ".join(checkpoint_args)
+            if extension_config.CONFIG_TOGSIM_DEBUG_LEVEL:
+                cmd += f" --log_level {extension_config.CONFIG_TOGSIM_DEBUG_LEVEL}"
+
+            logger.debug(f"[TOGSim] cmd> {cmd}")
+            logger.info(f"[TOGSim] TOGSim batch {idx} started")
+
+            env = os.environ.copy()
+            env.update(env_overrides)
+            completed = subprocess.run(shlex.split(cmd), capture_output=True, check=True, env=env)
+            result_bytes = completed.stdout
+
+        result_path = self._batch_dir / f"{idx}.log"
+        with open(result_path, "wb") as f:
+            f.write(result_bytes)
+        logger.info(f'[TOGSim] Simulation log is stored to "{result_path}"')
+
+        # Continue the chain: the next batch picks up from here.
+        self._checkpoint_path = checkpoint_out
+        ssd_trace_path = TOGSimulator._find_ssd_trace_path(result_bytes)
+        if ssd_trace_path is not None:
+            self._ssd_trace_continue_path = ssd_trace_path
+        self._last_result_path = result_path
 
     def _send_command(self, command_type, device_index, stream_index, tog_path="", attribute_path="", timestamp=0):
         """
-        Internal method to send a command to TOGSim via FIFO.
+        Queue a command into the pending batch (run through a fresh TOGSim
+        process by _flush_batch(), triggered by device_synchronize() or
+        until()) instead of writing it straight to a live process's FIFO --
+        see _flush_batch() for why.
 
         Args:
             command_type: Type of command ("LAUNCH_KERNEL" or "DEVICE_SYNC")
@@ -342,12 +445,6 @@ class TOGSimulator():
         Returns:
             int: The kernel ID assigned to this command
         """
-        if self.process is None:
-            raise RuntimeError("[TOGSim] Simulator process is not running")
-
-        if self.process.poll() is not None:
-            raise RuntimeError("[TOGSim] Simulator process has terminated")
-
         # Get and increment kernel ID
         kernel_id = self._next_kernel_id
         self._next_kernel_id += 1
@@ -355,70 +452,34 @@ class TOGSimulator():
         # Format command: command_type,kernel_id,device_index,stream_index,tog_path,attribute_path,timestamp
         command = f"{command_type},{kernel_id},{device_index},{stream_index},{tog_path},{attribute_path},{timestamp}"
 
-        with self._trace_file_lock:
-            # Write command to TOGSim
-            try:
-                self._trace_file_handle.write(command + '\n')
-                self._trace_file_handle.flush()
-                self.trace_log += command + '\n'
-                logger.debug(f"[TOGSim] Sent command: {command}")
-            except IOError as e:
-                logger.error(f"[TOGSim] Failed to write to trace file: {e}")
-                raise RuntimeError(f"Failed to send command to TOGSim: {e}")
+        self._pending_batch_lines.append(command)
+        self.trace_log += command + '\n'
+        logger.debug(f"[TOGSim] Queued command: {command}")
         return kernel_id
 
     def until(self):
-        # Make sure that all kernels in the stream are finished
+        # Make sure that all kernels in the stream are finished. This calls
+        # back into device_synchronize() (via torch.npu's active-simulator
+        # hook), which flushes the pending batch -- the explicit
+        # _flush_batch() below is a safety net for anything queued after
+        # that (or if nothing ever explicitly synced at all), mirroring
+        # process_trace_file()'s own EOF-triggered cycle() call.
         torch.npu.synchronize()
+        self._flush_batch()
 
-        # Close trace file handle if open
-        if self._trace_file_handle is not None:
-            try:
-                self._trace_file_handle.close()
-            except:
-                pass
-            self._trace_file_handle = None
-
-        stdout_output = ""
-        if self.process:
-            # Use communicate() to drain stdout/stderr pipes while waiting.
-            # process.wait() without draining causes a deadlock when TOGSim's
-            # verbose stats output fills the OS pipe buffer (64 KB on Linux).
-            stdout_bytes, stderr_bytes = self.process.communicate()
-            stdout_output = stdout_bytes if isinstance(stdout_bytes, str) else (stdout_bytes.decode(errors="replace") if stdout_bytes else "")
-            stderr_output = stderr_bytes if isinstance(stderr_bytes, str) else (stderr_bytes.decode(errors="replace") if stderr_bytes else "")
-
-            # Print stderr immediately if there's any error output
-            if stderr_output:
-                sys.stderr.write(stderr_output)
-                sys.stderr.flush()
-
-            self.process = None
-
-        # Save log and trace with a shared sequential index
-        if stdout_output or self.trace_log:
+        if self.trace_log:
             log_base_dir = Path(extension_config.CONFIG_TORCHSIM_LOG_PATH)
             log_base_dir.mkdir(parents=True, exist_ok=True)
             idx = TOGSimulator._next_result_index(log_base_dir)
-
-            if stdout_output:
-                result_path = log_base_dir / f"{idx}.log"
-                with open(result_path, "w") as f:
-                    f.write(stdout_output)
-                logger.info(f'[TOGSim] Simulation log is stored to "{result_path}"')
-
-            if self.trace_log:
-                trace_path = log_base_dir / f"{idx}.trace"
-                with open(trace_path, "w") as f:
-                    f.write(self.trace_log)
-                logger.info(f'[TOGSim] Trace log is stored to "{trace_path}"')
-
-        # Clean up FIFOs
-        self._cleanup_fifos()
+            trace_path = log_base_dir / f"{idx}.trace"
+            with open(trace_path, "w") as f:
+                f.write(self.trace_log)
+            logger.info(f'[TOGSim] Trace log is stored to "{trace_path}"')
 
     def launch_kernel(self, device_index, stream_index, tog_path, attribute_path, timestamp=0):
         """
-        Launch a kernel via FIFO communication.
+        Queue a kernel launch -- actually runs on the next device_synchronize()
+        or until() (see _flush_batch()), not immediately.
 
         Args:
             device_index: Device index
@@ -434,7 +495,9 @@ class TOGSimulator():
 
     def device_synchronize(self, device_index):
         """
-        Synchronize all streams on a device via FIFO communication.
+        Synchronize all streams on a device -- queues a DEVICE_SYNC and
+        flushes the accumulated batch through a fresh TOGSim process (see
+        _flush_batch()).
 
         Args:
             device_index: Device index to synchronize
@@ -444,7 +507,9 @@ class TOGSimulator():
             int: The command ID assigned to this synchronization
         """
         # For device_synchronize, stream_index is not meaningful, use 0
-        return self._send_command("DEVICE_SYNC", device_index, 0, "", "", 0)
+        kernel_id = self._send_command("DEVICE_SYNC", device_index, 0, "", "", 0)
+        self._flush_batch()
+        return kernel_id
 
     @classmethod
     def sram_alloc(cls, buf_name, addr_range):
@@ -551,7 +616,8 @@ class TOGSimulator():
 
     @staticmethod
     def _build_legosim_yaml(togsim_bin, config, trace_file_path, run_dir, log_level="",
-                             use_ssd=True, use_dram=False, use_dram_noc=False, core_freq_mhz=None):
+                             use_ssd=True, use_dram=False, use_dram_noc=False, core_freq_mhz=None,
+                             extra_togsim_args=None):
         """
         Write an interchiplet benchmark YAML pairing TOGSim (phase1[0], chiplet
         (0,0)) with whichever LegoSim simlet(s) are requested: the SSD simlet
@@ -587,6 +653,8 @@ class TOGSimulator():
         togsim_args = ["--config", str(config), "--models_list", str(trace_file_path)]
         if log_level:
             togsim_args += ["--log_level", log_level]
+        if extra_togsim_args:
+            togsim_args += list(extra_togsim_args)
 
         togsim_clock_rate = core_freq_mhz / 1000.0 if (use_dram and core_freq_mhz) else 1.0
         phase1 = [
@@ -953,14 +1021,17 @@ class TOGSimulator():
                 # protocol (kept as togsim.log) vs. TOGSim's own log (moved to
                 # a sibling pytorchsim.log) -- see _split_togsim_logs().
                 TOGSimulator._split_togsim_logs(run_dir)
-                # TOGSim is phase1[0] of the YAML above -> round 1, phase 1, thread 0.
-                # Still correct with use_dram_noc's multiple rounds: every round
-                # re-runs TOGSim against the same trace/config, and DMA.cc's
-                # DramLegoSimLink path only ever consumes resp.latency_ns (the
-                # simlet's own bandwidth-formula payload, independent of any
-                # interchiplet-level cycle bookkeeping) -- so TOGSim's reported
-                # result is round-invariant and round 1's log is as good as any.
-                pytorchsim_log = run_dir / "proc_r1_p1_t0" / "pytorchsim.log"
+                # TOGSim is phase1[0] of the YAML above -> phase 1, thread 0. With
+                # use_dram_noc, DMA.cc's DramLegoSimLink path resolves latency from
+                # the real interchiplet-elapsed cycle (see
+                # DramLegoSimLink::query_latency_ns()), which popnet only feeds
+                # real NoC delay into starting round 2 (round 1 has no prior
+                # delayInfo.txt yet) -- so TOGSim's reported cycles are NOT
+                # round-invariant here (confirmed: round 1 under-reports vs. the
+                # converged round). Always read the last round, which is what the
+                # checkpoint (written by every round, so left holding the last
+                # round's counters once interchiplet exits) already reflects.
+                pytorchsim_log = run_dir / f"proc_r{rounds}_p1_t0" / "pytorchsim.log"
                 result = pytorchsim_log.read_bytes() if pytorchsim_log.exists() else b""
             else:
                 cmd = f"{TOGSimulator.get_togsim_command(config_path, togsim_path)} --models_list {trace_file_path}"

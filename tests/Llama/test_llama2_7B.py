@@ -453,19 +453,28 @@ def run_llama_gen_streamed_npu(
     )
 
     print("Generating on NPU (streaming one decoder layer at a time)...")
-    for step in range(max_new_tokens):
-        step_input_ids = gen_ids if step == 0 else gen_ids[:, -1:]
-        logits = _forward_streamed_npu(
-            model, loader, compiled_prelude, compiled_epilogue,
-            step_input_ids, gen_mask, past_key_values, device, torch_dtype,
-        )
-        next_token = logits[:, -1, :].argmax(dim=-1, keepdim=True)
-        gen_ids = torch.cat([gen_ids, next_token], dim=1)
-        gen_mask = torch.cat([gen_mask, torch.ones_like(next_token)], dim=1)
-        print(f"Step {step}: outputs={tokenizer.decode(gen_ids[0], skip_special_tokens=True)}")
-        if next_token.item() == tokenizer.eos_token_id:
-            print("[NPU streamed] EOS reached, stopping early.")
-            break
+    # Wrap the whole decode loop in one TOGSimulator context so every kernel
+    # across every step dispatches via TOGSimulator.launch_kernel() into a
+    # single persistent TOGSim process (Simulator/simulator.py), instead of
+    # falling through to TOGSimulator.run_standalone(), which spawns a fresh
+    # TOGSim process per kernel. extension_codecache.py's run_kernel_simulation
+    # only takes the persistent-process path when torch.npu.get_tog_simulator()
+    # is non-None, which requires an active TOGSimulator context -- without
+    # one (as before this change), every kernel used run_standalone() instead.
+    with TOGSimulator():
+        for step in range(max_new_tokens):
+            step_input_ids = gen_ids if step == 0 else gen_ids[:, -1:]
+            logits = _forward_streamed_npu(
+                model, loader, compiled_prelude, compiled_epilogue,
+                step_input_ids, gen_mask, past_key_values, device, torch_dtype,
+            )
+            next_token = logits[:, -1, :].argmax(dim=-1, keepdim=True)
+            gen_ids = torch.cat([gen_ids, next_token], dim=1)
+            gen_mask = torch.cat([gen_mask, torch.ones_like(next_token)], dim=1)
+            print(f"Step {step}: outputs={tokenizer.decode(gen_ids[0], skip_special_tokens=True)}")
+            if next_token.item() == tokenizer.eos_token_id:
+                print("[NPU streamed] EOS reached, stopping early.")
+                break
 
     TOGSimulator.launch_kernel = _orig_launch
     print(f"\n[NPU dispatch summary] {len(_dispatch_log)} kernel(s) launched through NPU simulator")

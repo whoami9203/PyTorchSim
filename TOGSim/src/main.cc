@@ -106,6 +106,14 @@ int main(int argc, char** argv) {
       "models_list", "Path for the trace file (.trace)");
   cmd_parser.add_command_line_option<std::string>(
       "log_level", "Set for log level [trace, debug, info], default = info");
+  cmd_parser.add_command_line_option<std::string>(
+      "checkpoint_in", "Optional: path to a checkpoint written by a previous "
+      "batch's --checkpoint_out (see Simulator::load_checkpoint) -- restores "
+      "the running cycle counters instead of starting from 0.");
+  cmd_parser.add_command_line_option<std::string>(
+      "checkpoint_out", "Optional: path to write this run's final cycle "
+      "counters to (see Simulator::save_checkpoint), for a later batch's "
+      "--checkpoint_in to pick up.");
   try {
     cmd_parser.parse(argc, argv);
   } catch (const CommandLineParser::ParsingError& e) {
@@ -149,6 +157,12 @@ int main(int argc, char** argv) {
     exit(1);
   }
 
+  std::string checkpoint_in;
+  cmd_parser.set_if_defined("checkpoint_in", &checkpoint_in);
+  if (!checkpoint_in.empty()) {
+    simulator->load_checkpoint(checkpoint_in);
+  }
+
   // Get trace file path
   cmd_parser.set_if_defined("models_list", &trace_file_path);
 
@@ -158,6 +172,12 @@ int main(int argc, char** argv) {
                        simulator->get_hardware_config_yaml());
     spdlog::info("Simulation finished");
     simulator->print_core_stat();
+
+    std::string checkpoint_out;
+    cmd_parser.set_if_defined("checkpoint_out", &checkpoint_out);
+    if (!checkpoint_out.empty()) {
+      simulator->save_checkpoint(checkpoint_out);
+    }
   } else {
     spdlog::error("No trace file provided. Use --models_list to specify trace file path.");
     exit(1);

@@ -1,6 +1,7 @@
 #include "Simulator.h"
 #include "SsdTrace.h"
 
+#include <cstdlib>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -264,4 +265,37 @@ void Simulator::print_core_stat()
     _cores[core_id]->print_stats();
   }
   spdlog::info("Total execution cycles: {}", _core_cycles);
+}
+
+void Simulator::save_checkpoint(const std::string& path) {
+  std::ofstream out(path, std::ios::out | std::ios::trunc);
+  if (!out.is_open()) {
+    spdlog::error("[Simulator] Failed to write checkpoint: {}", path);
+    return;
+  }
+  out << "core_cycles=" << _core_cycles << "\n";
+  out << "core_time=" << _core_time << "\n";
+  out << "dram_time=" << _dram_time << "\n";
+  out << "icnt_time=" << _icnt_time << "\n";
+  spdlog::info("[Simulator] Wrote checkpoint to {} (core_cycles={})", path, _core_cycles);
+}
+
+void Simulator::load_checkpoint(const std::string& path) {
+  std::ifstream in(path);
+  if (!in.is_open()) {
+    spdlog::error("[Simulator] Failed to read checkpoint: {}", path);
+    return;
+  }
+  std::string line;
+  while (std::getline(in, line)) {
+    std::size_t eq = line.find('=');
+    if (eq == std::string::npos) continue;
+    std::string key = line.substr(0, eq);
+    uint64_t value = std::strtoull(line.substr(eq + 1).c_str(), nullptr, 10);
+    if (key == "core_cycles") _core_cycles = value;
+    else if (key == "core_time") _core_time = value;
+    else if (key == "dram_time") _dram_time = value;
+    else if (key == "icnt_time") _icnt_time = value;
+  }
+  spdlog::info("[Simulator] Loaded checkpoint from {} (core_cycles={})", path, _core_cycles);
 }

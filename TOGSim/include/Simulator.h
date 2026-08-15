@@ -43,6 +43,19 @@ class Simulator {
   void cycle();
   const SimulationConfig& get_config() const { return _config; }
   const YAML::Node& get_hardware_config_yaml() const { return _hardware_config_yaml; }
+
+  // Persist/restore the 4 counters that carry meaning across a process
+  // restart at a quiescent point (cycle() only returns once running() is
+  // false -- see cycle()'s own comment for why that makes this safe): the
+  // multi-kernel batching path (Simulator/simulator.py's TOGSimulator)
+  // restarts this process once per DEVICE_SYNC-bounded batch so each batch
+  // can run under interchiplet's real multi-round NoC convergence (which
+  // requires TOGSim to actually exit and restart each round) without losing
+  // the running cycle count across batches. No other state needs saving:
+  // at a quiescent point there is no in-flight compute/DMA/interconnect
+  // work left, only these monotonic counters.
+  void save_checkpoint(const std::string& path);
+  void load_checkpoint(const std::string& path);
  private:
   void core_cycle();
   void dram_cycle();

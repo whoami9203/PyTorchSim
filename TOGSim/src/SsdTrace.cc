@@ -73,6 +73,27 @@ SsdTraceManager::SsdTraceManager() {
 
 void SsdTraceManager::open_trace() {
   namespace fs = std::filesystem;
+
+  const char* continue_path_env = std::getenv("TOGSIM_SSD_TRACE_CONTINUE_PATH");
+  if (continue_path_env && std::string(continue_path_env).size() && fs::exists(continue_path_env)) {
+    // Continuing a previous batch's trace file (see the multi-kernel
+    // batching path in Simulator/simulator.py's TOGSimulator, which restarts
+    // this process once per DEVICE_SYNC-bounded batch) -- append instead of
+    // starting a new numbered file, so ssd_traces/.../dma_trace_N.csv stays
+    // one continuous file across batches instead of fragmenting into one
+    // file per batch.
+    _trace_path = continue_path_env;
+    _trace_file.open(_trace_path, std::ios::out | std::ios::app);
+    if (!_trace_file.is_open()) {
+      spdlog::error("[SSD] Failed to append to continued trace file: {}", _trace_path);
+      _enabled = false;
+      return;
+    }
+    // No header write -- the file already has one from when open_trace()
+    // first created it for the earliest batch in this chain.
+    return;
+  }
+
   const fs::path counter_path = fs::path(_trace_base_dir) / _trace_name / "dma_trace_counter.txt";
   uint64_t trace_counter = 0;
   if (fs::exists(counter_path)) {

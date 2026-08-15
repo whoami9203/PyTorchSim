@@ -77,10 +77,23 @@ def _run_forward(model, loader, input_ids, attention_mask, past_key_values, devi
     if not npu:
         return _forward_streamed(model, loader, input_ids, attention_mask, past_key_values, device, torch_dtype)
     compiled_prelude, compiled_epilogue = _compile_for_npu(model, config)
-    return _forward_streamed_npu(
-        model, loader, compiled_prelude, compiled_epilogue,
-        input_ids, attention_mask, past_key_values, device, torch_dtype,
-    )
+    # Wrap the actual forward call (not the torch.compile() calls above, which
+    # are lazy and don't dispatch anything by themselves) in a TOGSimulator
+    # context so this phase's kernels dispatch through
+    # TOGSimulator.launch_kernel() into a single persistent TOGSim process
+    # (Simulator/simulator.py), instead of TOGSimulator.run_standalone()
+    # spawning a fresh TOGSim process per kernel -- same fix as
+    # test_llama2_7B.py's decode loop. extension_codecache.py's
+    # run_kernel_simulation only takes the persistent-process path when
+    # torch.npu.get_tog_simulator() is non-None, which requires an active
+    # TOGSimulator context. Covers run_prefill/run_decode/run_compare alike,
+    # since they all call through here for their NPU dispatch.
+    from Simulator.simulator import TOGSimulator
+    with TOGSimulator():
+        return _forward_streamed_npu(
+            model, loader, compiled_prelude, compiled_epilogue,
+            input_ids, attention_mask, past_key_values, device, torch_dtype,
+        )
 
 
 def _build_phase_inputs(phase, config, batch, length, seed, torch_dtype, device):
