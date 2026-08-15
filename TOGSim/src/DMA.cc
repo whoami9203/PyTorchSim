@@ -77,7 +77,7 @@ std::shared_ptr<std::vector<mem_fetch*>> DMA::get_memory_access(cycle_type core_
           const uint64_t total_bytes = (total_bits + 7) >> 3;
           latency_ns = SsdLegoSimLink::instance().query_latency_ns(
               base_addr, total_bytes, _current_inst->get_global_inst_id(),
-              _current_inst->get_addr_name());
+              _current_inst->get_addr_name(), static_cast<uint64_t>(core_cycle));
           have_latency = true;
         }
       } else {

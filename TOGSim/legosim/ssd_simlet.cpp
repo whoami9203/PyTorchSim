@@ -11,6 +11,14 @@
 // This is a placeholder -- swap compute_latency_ns() for a real SSD/DRAM
 // simulator's estimate to get actual modeled numbers.
 //
+// Like artifact/HBM_DDR/DDR.cpp/HBM.cpp and dram_simlet.cpp, this simlet
+// tracks a running `timeNow` across requests instead of always reporting
+// cycle 0 -- this is what lets the phase-2 NoC simlet (always plugged in
+// whenever SsdLegoSimLink is enabled -- see _build_legosim_yaml's use_ssd
+// handling in Simulator/simulator.py) actually influence the read/write
+// pairing (interchiplet's getEndCycle()) instead of being computed against
+// a fixed baseline every time.
+//
 // argv: <self_x> <self_y> <peer_x> <peer_y> [bandwidth_gbps] [base_latency_ns]
 // Defaults match the (0,0)=NPU / (1,0)=DRAM convention used elsewhere in
 // this integration (e.g. tests/Llama/test_legosim_integration.py).
@@ -59,12 +67,18 @@ int main(int argc, char** argv) {
 
   InterChiplet::PipeComm pipe_comm;
 
+  // Current known simulated time for this chiplet, threaded through
+  // readSync/writeSync's cycle argument -- same role as
+  // DDR.cpp/HBM.cpp/dram_simlet.cpp's local `timeNow`.
+  InterChiplet::TimeType timeNow = 1;
+
   while (true) {
     // Receive one request from TOGSim.
     std::string req_file = InterChiplet::receiveSync(peer_x, peer_y, self_x, self_y);
     SsdLatencyRequest req{};
     pipe_comm.read_data(req_file.c_str(), &req, sizeof(req));
-    InterChiplet::readSync(0, peer_x, peer_y, self_x, self_y, sizeof(req), 0);
+    InterChiplet::TimeType time_end =
+        InterChiplet::readSync(timeNow, peer_x, peer_y, self_x, self_y, sizeof(req), 0);
 
     SsdLatencyResponse resp{};
     if (!req.terminate) {
@@ -73,14 +87,28 @@ int main(int argc, char** argv) {
                 << " nbytes=" << req.nbytes << " inst_id=" << req.inst_id
                 << " addr_name=" << req.addr_name
                 << " -> latency_ns=" << resp.latency_ns << std::endl;
+
+      // Advance timeNow past the modeled latency, added on top of wherever
+      // the request actually landed (time_end -- informed by the phase-2
+      // NoC delay). Mirrors dram_simlet.cpp's identical update.
+      timeNow = static_cast<InterChiplet::TimeType>(resp.latency_ns) + time_end;
     } else {
       resp.latency_ns = 0;
+      timeNow = time_end;
     }
+
+    // Report our own advancing cycle to interchiplet's top-level "Benchmark
+    // elapses N cycle."/convergence bookkeeping -- fire-and-forget, no
+    // reply to wait for. See dram_simlet.cpp's identical call for why this
+    // is sendCycleCmd() and not InterChiplet::cycleSync() (which would
+    // block forever: handle_cycle_cmd never sends a SYNC response for a
+    // CYCLE command).
+    InterChiplet::sendCycleCmd(timeNow);
 
     // Send the response back (also used to ack the terminate sentinel).
     std::string resp_file = InterChiplet::sendSync(self_x, self_y, peer_x, peer_y);
     pipe_comm.write_data(resp_file.c_str(), &resp, sizeof(resp));
-    InterChiplet::writeSync(0, self_x, self_y, peer_x, peer_y, sizeof(resp), 0);
+    InterChiplet::writeSync(timeNow, self_x, self_y, peer_x, peer_y, sizeof(resp), 0);
 
     if (req.terminate) {
       std::cout << "[ssd_simlet] received terminate sentinel, exiting." << std::endl;

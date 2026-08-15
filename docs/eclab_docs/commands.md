@@ -3,9 +3,9 @@
 ```bash
 #source setup_env_var.sh ${TOGSIM_SSD_TRACE_NAME} [0/1]
 # Original
-source setup_env_var.sh test1 0 0 0
-# With DRAM simlet linked by LegoSim
-source setup_env_var.sh test1 0 1 1
+source setup_env_var.sh test1 0 0
+# With DRAM simlet linked by LegoSim (NoC always on when this or SSD is on)
+source setup_env_var.sh test1 0 1
 ```
 
 Llama2-7B 存取權

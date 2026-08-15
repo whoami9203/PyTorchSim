@@ -143,7 +143,11 @@ def __getattr__(name):
 
     # LegoSim live SSD/DRAM latency integration (see TOGSim/include/SsdLegoSimLink.h).
     # When enabled, run_standalone() runs TOGSim under interchiplet, paired
-    # with an SSD simlet, instead of running the TOGSim binary directly.
+    # with an SSD simlet, instead of running the TOGSim binary directly. A
+    # real phase-2 NoC simlet (popnet) always runs whenever this is enabled
+    # (see CONFIG_LEGOSIM_NOC_ROUNDS below) -- no separate opt-in toggle --
+    # ssd_simlet/SsdLegoSimLink track a running timeNow (see their own
+    # comments) specifically so this NoC delay always has somewhere to land.
     if name == "CONFIG_TOGSIM_LEGOSIM_SSD":
         return os.environ.get("TOGSIM_LEGOSIM_SSD", "0") == "1"
     if name == "CONFIG_LEGOSIM_ROOT":
@@ -157,7 +161,13 @@ def __getattr__(name):
     # TOGSim/include/DramLegoSimLink.h). Unlike the SSD path above (weight
     # reads only), this is a catch-all covering every DMA access -- reads
     # and writes -- and fully replaces TOGSim's real Dram/Interconnect
-    # models for the run when enabled.
+    # models for the run when enabled. Like the SSD path, a real phase-2
+    # NoC simlet (popnet) always runs whenever this is enabled -- no
+    # separate opt-in toggle -- exercising interchiplet's real two-phase
+    # fixed-point loop (see TOGSim/legosim/topology/dram_noc_3.gv) rather
+    # than the default one-shot (-t 1) path. dram_simlet/DramLegoSimLink
+    # track a running timeNow (like artifact/HBM_DDR/DDR.cpp) specifically
+    # so this NoC delay has somewhere to land.
     if name == "CONFIG_TOGSIM_LEGOSIM_DRAM":
         return os.environ.get("TOGSIM_LEGOSIM_DRAM", "0") == "1"
     if name == "CONFIG_LEGOSIM_DRAM_BANDWIDTH_GBPS":
@@ -165,17 +175,10 @@ def __getattr__(name):
     if name == "CONFIG_LEGOSIM_DRAM_BASE_LATENCY_NS":
         return float(os.environ.get("TOGSIM_LEGOSIM_DRAM_BASE_LATENCY_NS", "15.0"))
 
-    # Optional real phase-2 NoC simlet (popnet) for TOGSIM_LEGOSIM_DRAM runs,
-    # instead of the no-op /bin/true filler -- only meaningful together with
-    # CONFIG_TOGSIM_LEGOSIM_DRAM. Exercises interchiplet's real two-phase
-    # fixed-point loop (see TOGSim/legosim/topology/dram_noc_3.gv) rather
-    # than the default one-shot (-t 1) path. dram_simlet/DramLegoSimLink
-    # track a running timeNow (like artifact/HBM_DDR/DDR.cpp) specifically
-    # so this NoC delay has somewhere to land.
-    if name == "CONFIG_TOGSIM_LEGOSIM_DRAM_NOC":
-        return os.environ.get("TOGSIM_LEGOSIM_DRAM_NOC", "0") == "1"
-    if name == "CONFIG_LEGOSIM_DRAM_NOC_ROUNDS":
-        return int(os.environ.get("TOGSIM_LEGOSIM_DRAM_NOC_ROUNDS", "3"))
+    # How many phase-2 fixed-point rounds to run popnet for -- shared by
+    # both NoC paths above (both unconditional whenever their simlet is on).
+    if name == "CONFIG_LEGOSIM_NOC_ROUNDS":
+        return int(os.environ.get("TOGSIM_LEGOSIM_NOC_ROUNDS", "3"))
 
 # SRAM Buffer allocation plan
 def load_plan_from_module(module_path):

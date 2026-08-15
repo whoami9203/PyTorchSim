@@ -104,6 +104,16 @@ int main(int argc, char** argv) {
       timeNow = time_end;
     }
 
+    // Report our own advancing cycle to interchiplet's top-level "Benchmark
+    // elapses N cycle."/convergence bookkeeping (interchiplet.cpp's
+    // round_cycle, fed by SyncClockStruct::update()'s running max) -- fire-
+    // and-forget, no reply to wait for (unlike readSync/writeSync above):
+    // handle_cycle_cmd (cmd_handler.cpp) never sends a SYNC response for a
+    // CYCLE command, so InterChiplet::cycleSync() (which blocks waiting for
+    // one) would hang here forever. sendCycleCmd() is the correct,
+    // documented (docs/docs/04-import-sim/index.md) non-blocking call.
+    InterChiplet::sendCycleCmd(timeNow);
+
     // Send the response back (also used to ack the terminate sentinel).
     std::string resp_file = InterChiplet::sendSync(self_x, self_y, peer_x, peer_y);
     pipe_comm.write_data(resp_file.c_str(), &resp, sizeof(resp));

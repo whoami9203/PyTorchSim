@@ -297,17 +297,43 @@ class TOGSimulator():
             os.environ["TOGSIM_CONFIG"] = self._old_togsim_config_env
 
     @staticmethod
-    def _find_ssd_trace_path(log_bytes):
+    def _reserve_ssd_trace_path():
         """
-        Parses "[SSD] trace enabled: <path>" out of a batch's own log (see
-        SsdTraceManager's constructor, TOGSim/src/SsdTrace.cc) to learn which
-        dma_trace_N.csv file it picked, so the *next* batch can continue
-        appending to that same file (via TOGSIM_SSD_TRACE_CONTINUE_PATH)
-        instead of starting a new numbered one. Returns None if SSD tracing
-        wasn't enabled for this batch (line never printed).
+        Mirrors SsdTraceManager::open_trace()'s own numbered-filename scheme
+        (TOGSim/src/SsdTrace.cc's dma_trace_counter.txt bump) so Python can
+        pick the exact dma_trace_N.csv path *before* any TOGSim process
+        runs, and hand every process in the chain -- across every
+        interchiplet round within a batch, and across every batch -- the
+        same TOGSIM_SSD_TRACE_CONTINUE_PATH value from the very start.
+
+        This has to happen up front rather than being learned reactively
+        from the first batch's own log (as it used to be, back when SSD-
+        legosim's phase2 was a one-shot no-op): now that SSD's NoC always
+        runs (see CONFIG_TOGSIM_LEGOSIM_SSD's comment in extension_config.py),
+        a single batch can already involve multiple fresh TOGSim processes
+        -- one per round -- so a path learned only after the whole batch
+        finishes would already be too late for round 2+ of that very first
+        batch. SsdTraceManager::open_trace() now always uses whatever path
+        it's given here (creating it fresh with a header if this is really
+        the first process to reach it, appending otherwise), so reserving
+        the number without the file existing yet is safe.
+
+        Returns None if TOGSIM_SSD_TRACE_NAME isn't set (mirrors
+        SsdTraceManager's own no-op-when-unset behavior).
         """
-        m = re.search(rb"\[SSD\] trace enabled: (\S+)", log_bytes)
-        return m.group(1).decode() if m else None
+        trace_name = os.environ.get("TOGSIM_SSD_TRACE_NAME")
+        if not trace_name:
+            return None
+        trace_dir = os.environ.get("TOGSIM_SSD_TRACE_DIR") or "/workspace/PyTorchSim/ssd_traces"
+        trace_root = Path(trace_dir) / trace_name
+        trace_root.mkdir(parents=True, exist_ok=True)
+        counter_path = trace_root / "dma_trace_counter.txt"
+        counter = 0
+        if counter_path.exists():
+            counter = int(counter_path.read_text().strip() or 0)
+        counter += 1
+        counter_path.write_text(f"{counter}\n")
+        return trace_root / f"dma_trace_{counter}.csv"
 
     def _flush_batch(self):
         """
@@ -319,8 +345,8 @@ class TOGSimulator():
         many kernels/syncs accumulated in this batch instead of always 1.
 
         A fresh process per batch (rather than one long-lived FIFO-fed
-        process for the whole session) is what lets TOGSIM_LEGOSIM_DRAM_NOC's
-        multi-round convergence work: interchiplet's -t N respawns every
+        process for the whole session) is what lets a real multi-round NoC
+        convergence work: interchiplet's -t N respawns every
         phase1 process (including TOGSim) fresh each round, which only works
         for a process that's actually expected to exit and restart -- not one
         Python is still streaming kernels into (that deadlocks: a respawned
@@ -354,8 +380,13 @@ class TOGSimulator():
 
         use_legosim_ssd = extension_config.CONFIG_TOGSIM_LEGOSIM_SSD
         use_legosim_dram = extension_config.CONFIG_TOGSIM_LEGOSIM_DRAM
-        use_dram_noc = use_legosim_dram and extension_config.CONFIG_TOGSIM_LEGOSIM_DRAM_NOC
-        core_freq_mhz = self.config_yaml["core_freq_mhz"] if use_legosim_dram else None
+        # Neither has a separate opt-in NoC toggle -- both always run a real
+        # popnet round trip whenever their own simlet is enabled.
+        use_noc = use_legosim_ssd or use_legosim_dram
+        core_freq_mhz = self.config_yaml["core_freq_mhz"] if (use_legosim_ssd or use_legosim_dram) else None
+
+        if use_legosim_ssd and self._ssd_trace_continue_path is None:
+            self._ssd_trace_continue_path = TOGSimulator._reserve_ssd_trace_path()
 
         env_overrides = {}
         if self._ssd_trace_continue_path is not None:
@@ -367,15 +398,15 @@ class TOGSimulator():
             yaml_path = TOGSimulator._build_legosim_yaml(
                 togsim_bin, os.path.join(self.base_dir, self.config_path), trace_file_path, run_dir,
                 log_level=extension_config.CONFIG_TOGSIM_DEBUG_LEVEL,
-                use_ssd=use_legosim_ssd, use_dram=use_legosim_dram, use_dram_noc=use_dram_noc,
+                use_ssd=use_legosim_ssd, use_dram=use_legosim_dram,
                 core_freq_mhz=core_freq_mhz, extra_togsim_args=checkpoint_args,
             )
             interchiplet_bin = os.path.join(extension_config.CONFIG_LEGOSIM_ROOT, "interchiplet/bin/interchiplet")
-            rounds = extension_config.CONFIG_LEGOSIM_DRAM_NOC_ROUNDS if use_dram_noc else 1
+            rounds = extension_config.CONFIG_LEGOSIM_NOC_ROUNDS if use_noc else 1
             cmd = f"{interchiplet_bin} {yaml_path} -w 3 -f 2 -t {rounds}"
 
             path_desc = "+".join(
-                p for p, on in (("SSD", use_legosim_ssd), ("DRAM", use_legosim_dram), ("NoC", use_dram_noc)) if on
+                p for p, on in (("SSD", use_legosim_ssd), ("DRAM", use_legosim_dram), ("NoC", use_noc)) if on
             )
             logger.debug(f"[TOGSim] cmd> {cmd}")
             logger.info(f"[TOGSim] TOGSim batch {idx} started (LegoSim {path_desc} path)")
@@ -393,10 +424,10 @@ class TOGSimulator():
                 phase1_basenames.append("ssd_simlet")
             if use_legosim_dram:
                 phase1_basenames.append("dram_simlet")
-            phase2_basenames = ["popnet"] if use_dram_noc else ["true"]
+            phase2_basenames = ["popnet"] if use_noc else ["true"]
             TOGSimulator._split_interchiplet_log(run_dir, interchiplet_stdout, phase1_basenames, phase2_basenames)
             TOGSimulator._split_togsim_logs(run_dir)
-            # See run_standalone()'s matching comment: with use_dram_noc, TOGSim's
+            # See run_standalone()'s matching comment: with use_noc, TOGSim's
             # reported cycles differ round to round (converging by the last one),
             # so always read the last round -- never round 1.
             pytorchsim_log = run_dir / f"proc_r{rounds}_p1_t0" / "pytorchsim.log"
@@ -421,10 +452,9 @@ class TOGSimulator():
         logger.info(f'[TOGSim] Simulation log is stored to "{result_path}"')
 
         # Continue the chain: the next batch picks up from here.
+        # (self._ssd_trace_continue_path itself was already reserved -- and
+        # so doesn't need updating here -- see the top of this method.)
         self._checkpoint_path = checkpoint_out
-        ssd_trace_path = TOGSimulator._find_ssd_trace_path(result_bytes)
-        if ssd_trace_path is not None:
-            self._ssd_trace_continue_path = ssd_trace_path
         self._last_result_path = result_path
 
     def _send_command(self, command_type, device_index, stream_index, tog_path="", attribute_path="", timestamp=0):
@@ -616,7 +646,7 @@ class TOGSimulator():
 
     @staticmethod
     def _build_legosim_yaml(togsim_bin, config, trace_file_path, run_dir, log_level="",
-                             use_ssd=True, use_dram=False, use_dram_noc=False, core_freq_mhz=None,
+                             use_ssd=True, use_dram=False, core_freq_mhz=None,
                              extra_togsim_args=None):
         """
         Write an interchiplet benchmark YAML pairing TOGSim (phase1[0], chiplet
@@ -627,28 +657,31 @@ class TOGSimulator():
         replacing TOGSim's real Dram/Interconnect models).
 
         phase2 is normally a no-op /bin/true filler -- interchiplet indexes
-        phase2[0] unconditionally even though we don't need NoC modeling here
-        (each simlet's answer already carries the real latency). When
-        use_dram_noc is set (only meaningful together with use_dram), phase2
-        instead runs a real popnet against TOGSim/legosim/topology/dram_noc_3.gv
-        (covering every chiplet coordinate this integration uses), exercising
-        interchiplet's real two-phase fixed-point loop -- dram_simlet and
-        DramLegoSimLink track a running timeNow (see their own comments)
-        specifically so this NoC delay has somewhere to land instead of being
-        silently discarded.
+        phase2[0] unconditionally even though we don't always need NoC
+        modeling (each simlet's answer already carries the real latency).
+        Real popnet instead runs in phase2 whenever use_ssd or use_dram is
+        set -- neither has a separate opt-in NoC toggle, both always run a
+        real NoC round trip -- against TOGSim/legosim/topology/dram_noc_3.gv
+        (covering every chiplet coordinate this integration uses -- the
+        name predates the SSD path gaining NoC support too, but the
+        topology itself is simlet-agnostic). This exercises interchiplet's
+        real two-phase fixed-point loop -- ssd_simlet/dram_simlet and
+        SsdLegoSimLink/DramLegoSimLink all track a running timeNow (see
+        their own comments) specifically so this NoC delay has somewhere to
+        land instead of being silently discarded.
 
         TOGSim's own coordinates/peer coordinates must match SsdLegoSimLink's/
         DramLegoSimLink's env-var defaults (TOGSIM_LEGOSIM_X/Y=0,0,
         TOGSIM_SSD_LEGOSIM_X/Y=1,0, TOGSIM_DRAM_PEER_LEGOSIM_X/Y=2,0), which
         _legosim_env() sets for this same subprocess.
 
-        TOGSim's clock_rate is set to core_freq_mhz/1000 (when use_dram --
-        dram_simlet/ssd_simlet stay at 1.0, already ns-native) so
-        interchiplet can correctly reconcile TOGSim's core-cycle domain
-        against dram_simlet's ns domain when resolving a round trip's end
-        cycle -- see DramLegoSimLink::query_latency_ns()'s comment for how
-        that resolved cycle is used. SsdLegoSimLink is unaffected either
-        way: it never reads back interchiplet's resolved cycle.
+        TOGSim's clock_rate is set to core_freq_mhz/1000 whenever use_ssd or
+        use_dram is set (ssd_simlet/dram_simlet themselves stay at 1.0,
+        already ns-native) so interchiplet can correctly reconcile TOGSim's
+        core-cycle domain against the simlets' ns domain when resolving a
+        round trip's end cycle -- see DramLegoSimLink::query_latency_ns()'s
+        comment (SsdLegoSimLink now works identically) for how that resolved
+        cycle is used.
         """
         togsim_args = ["--config", str(config), "--models_list", str(trace_file_path)]
         if log_level:
@@ -656,7 +689,8 @@ class TOGSimulator():
         if extra_togsim_args:
             togsim_args += list(extra_togsim_args)
 
-        togsim_clock_rate = core_freq_mhz / 1000.0 if (use_dram and core_freq_mhz) else 1.0
+        use_noc = use_ssd or use_dram
+        togsim_clock_rate = core_freq_mhz / 1000.0 if (use_noc and core_freq_mhz) else 1.0
         phase1 = [
             {
                 "cmd": str(togsim_bin),
@@ -691,7 +725,7 @@ class TOGSimulator():
                 "clock_rate": 1.0,
             })
 
-        if use_dram_noc:
+        if use_noc:
             popnet_bin = os.path.join(extension_config.CONFIG_LEGOSIM_ROOT, "popnet_chiplet/build/popnet")
             # togsim_bin is <togsim_root>/build/bin/Simulator; strip those
             # three components back to <togsim_root> to find legosim/topology/.
@@ -742,6 +776,11 @@ class TOGSimulator():
             env["TOGSIM_SSD_LEGOSIM"] = "1"
             env["TOGSIM_SSD_LEGOSIM_X"] = "1"
             env["TOGSIM_SSD_LEGOSIM_Y"] = "0"
+            # Lets SsdLegoSimLink convert the core-cycle delta interchiplet
+            # resolves for each round trip back into ns -- must be the same
+            # value used to set TOGSim's clock_rate in _build_legosim_yaml.
+            if core_freq_mhz:
+                env["TOGSIM_SSD_LEGOSIM_CORE_FREQ_MHZ"] = str(core_freq_mhz)
         if use_dram:
             env["TOGSIM_DRAM_LEGOSIM"] = "1"
             env["TOGSIM_DRAM_PEER_LEGOSIM_X"] = "2"
@@ -763,7 +802,7 @@ class TOGSimulator():
         pipes.
 
         interchiplet's own stdout/stderr (its top-level spdlog output --
-        round/phase markers, and with use_dram_noc, the per-round
+        round/phase markers, and with use_noc, the per-round
         "Difference related to previous round is X%." convergence line) is
         captured via the pipe rather than inherited, so on success it would
         otherwise be silently discarded (only surfaced via
@@ -945,16 +984,29 @@ class TOGSimulator():
 
         use_legosim_ssd = extension_config.CONFIG_TOGSIM_LEGOSIM_SSD
         use_legosim_dram = extension_config.CONFIG_TOGSIM_LEGOSIM_DRAM
-        # Only meaningful together with use_legosim_dram -- ignore the toggle
-        # otherwise rather than requiring callers to keep the two in sync.
-        use_dram_noc = use_legosim_dram and extension_config.CONFIG_TOGSIM_LEGOSIM_DRAM_NOC
-        # Needed so DramLegoSimLink can convert interchiplet's resolved
-        # core-cycle delta back to ns -- see _build_legosim_yaml's
+        # Neither has a separate opt-in NoC toggle -- both always run a real
+        # popnet round trip whenever their own simlet is enabled.
+        use_noc = use_legosim_ssd or use_legosim_dram
+        # Needed so SsdLegoSimLink/DramLegoSimLink can convert interchiplet's
+        # resolved core-cycle delta back to ns -- see _build_legosim_yaml's
         # clock_rate comment and DramLegoSimLink::query_latency_ns().
         core_freq_mhz = None
-        if use_legosim_dram:
+        if use_legosim_ssd or use_legosim_dram:
             with open(os.path.join(togsim_path, config_path), "r") as f:
                 core_freq_mhz = yaml.safe_load(f)["core_freq_mhz"]
+
+        # SSD's NoC always running (use_noc above) means even this single
+        # run_standalone() call can now spawn multiple fresh TOGSim
+        # processes internally (one per round) -- reserve a trace path up
+        # front so they all append to the same file instead of each round
+        # fragmenting into its own dma_trace_N.csv. See
+        # TOGSimulator._flush_batch()'s matching (cross-batch) use of this
+        # same mechanism for the full rationale.
+        env_overrides = {}
+        if use_legosim_ssd:
+            ssd_trace_path = TOGSimulator._reserve_ssd_trace_path()
+            if ssd_trace_path is not None:
+                env_overrides["TOGSIM_SSD_TRACE_CONTINUE_PATH"] = str(ssd_trace_path)
 
         try:
             if use_legosim_ssd or use_legosim_dram:
@@ -963,7 +1015,7 @@ class TOGSimulator():
                 yaml_path = TOGSimulator._build_legosim_yaml(
                     togsim_bin, os.path.join(togsim_path, config_path), trace_file_path, run_dir,
                     log_level=extension_config.CONFIG_TOGSIM_DEBUG_LEVEL,
-                    use_ssd=use_legosim_ssd, use_dram=use_legosim_dram, use_dram_noc=use_dram_noc,
+                    use_ssd=use_legosim_ssd, use_dram=use_legosim_dram,
                     core_freq_mhz=core_freq_mhz,
                 )
                 interchiplet_bin = os.path.join(
@@ -971,37 +1023,41 @@ class TOGSimulator():
                 )
                 # -t 1: run exactly one round -- TOGSim already ran its one kernel
                 # to completion, and with the no-op phase2 filler there's nothing
-                # to re-converge on a second round. With use_dram_noc, phase2 is a
-                # real popnet instead, so we let it iterate CONFIG_LEGOSIM_DRAM_NOC_ROUNDS
-                # times: dram_simlet/DramLegoSimLink track a running timeNow (see
-                # their own comments) specifically so popnet's delayInfo.txt feeds
-                # back into a real round 2+ instead of being computed once and
-                # discarded. Note interchiplet's own convergence check (round-over-
-                # round cycle difference) never fires here regardless -- it's driven
-                # by explicit CYCLE sync commands neither dram_simlet nor
-                # DramLegoSimLink issue (matching DDR.cpp/HBM.cpp, which don't
-                # either) -- so all requested rounds always run; -t is a hard cap,
-                # not a target. -w 3 (not 2) so chiplet address 2 (dram_simlet) is
-                # always in range, needed for use_dram_noc's real popnet topology
-                # and harmless otherwise (DIM_Y is always 0 for every chiplet this
-                # integration uses, so width doesn't affect address resolution).
-                rounds = extension_config.CONFIG_LEGOSIM_DRAM_NOC_ROUNDS if use_dram_noc else 1
+                # to re-converge on a second round. With use_noc (unconditional
+                # whenever either simlet is enabled), phase2 is a real popnet
+                # instead, so we let it iterate CONFIG_LEGOSIM_NOC_ROUNDS times:
+                # ssd_simlet/dram_simlet and SsdLegoSimLink/DramLegoSimLink track
+                # a running timeNow (see their own comments) specifically so
+                # popnet's delayInfo.txt feeds back into a real round 2+ instead
+                # of being computed once and discarded. Note interchiplet's own
+                # convergence check (round-over-round cycle difference) never
+                # fires here regardless -- it's driven by explicit CYCLE sync
+                # commands neither simlet nor LegoSimLink issues (matching
+                # DDR.cpp/HBM.cpp, which don't either) -- so all requested
+                # rounds always run; -t is a hard cap, not a target. -w 3 (not
+                # 2) so chiplet address 2 (dram_simlet) is always in range,
+                # needed for DRAM's real popnet topology and harmless otherwise
+                # (DIM_Y is always 0 for every chiplet this integration uses,
+                # so width doesn't affect address resolution).
+                rounds = extension_config.CONFIG_LEGOSIM_NOC_ROUNDS if use_noc else 1
                 cmd = f"{interchiplet_bin} {yaml_path} -w 3 -f 2 -t {rounds}"
 
                 if not autotune_mode:
                     logger.debug(f"[TOGSim] cmd> {cmd}")
                     path_desc = "+".join(
                         p for p, on in (
-                            ("SSD", use_legosim_ssd), ("DRAM", use_legosim_dram), ("NoC", use_dram_noc),
+                            ("SSD", use_legosim_ssd), ("DRAM", use_legosim_dram), ("NoC", use_noc),
                         ) if on
                     )
                     logger.info(f"[TOGSim] TOGSim simulation started (LegoSim {path_desc} path)")
+                env = TOGSimulator._legosim_env(
+                    use_ssd=use_legosim_ssd, use_dram=use_legosim_dram, core_freq_mhz=core_freq_mhz,
+                )
+                env.update(env_overrides)
                 with ProgressBar("[TOGSim] Running simulation", silent_mode=autotune_mode):
                     interchiplet_stdout, _ = TOGSimulator._run_interchiplet(
                         shlex.split(cmd), cwd=run_dir,
-                        env=TOGSimulator._legosim_env(
-                            use_ssd=use_legosim_ssd, use_dram=use_legosim_dram, core_freq_mhz=core_freq_mhz,
-                        ),
+                        env=env,
                         timeout_sec=timeout_sec,
                     )
                 # Route interchiplet's own top-level log into a per-process
@@ -1013,7 +1069,7 @@ class TOGSimulator():
                     phase1_basenames.append("ssd_simlet")
                 if use_legosim_dram:
                     phase1_basenames.append("dram_simlet")
-                phase2_basenames = ["popnet"] if use_dram_noc else ["true"]
+                phase2_basenames = ["popnet"] if use_noc else ["true"]
                 TOGSimulator._split_interchiplet_log(
                     run_dir, interchiplet_stdout, phase1_basenames, phase2_basenames
                 )
@@ -1022,15 +1078,16 @@ class TOGSimulator():
                 # a sibling pytorchsim.log) -- see _split_togsim_logs().
                 TOGSimulator._split_togsim_logs(run_dir)
                 # TOGSim is phase1[0] of the YAML above -> phase 1, thread 0. With
-                # use_dram_noc, DMA.cc's DramLegoSimLink path resolves latency from
-                # the real interchiplet-elapsed cycle (see
-                # DramLegoSimLink::query_latency_ns()), which popnet only feeds
-                # real NoC delay into starting round 2 (round 1 has no prior
-                # delayInfo.txt yet) -- so TOGSim's reported cycles are NOT
-                # round-invariant here (confirmed: round 1 under-reports vs. the
-                # converged round). Always read the last round, which is what the
-                # checkpoint (written by every round, so left holding the last
-                # round's counters once interchiplet exits) already reflects.
+                # use_noc, DMA.cc's SsdLegoSimLink/DramLegoSimLink paths resolve
+                # latency from the real interchiplet-elapsed cycle (see
+                # DramLegoSimLink::query_latency_ns(), SsdLegoSimLink now works
+                # identically), which popnet only feeds real NoC delay into
+                # starting round 2 (round 1 has no prior delayInfo.txt yet) --
+                # so TOGSim's reported cycles are NOT round-invariant here
+                # (confirmed: round 1 under-reports vs. the converged round).
+                # Always read the last round, which is what the checkpoint
+                # (written by every round, so left holding the last round's
+                # counters once interchiplet exits) already reflects.
                 pytorchsim_log = run_dir / f"proc_r{rounds}_p1_t0" / "pytorchsim.log"
                 result = pytorchsim_log.read_bytes() if pytorchsim_log.exists() else b""
             else:

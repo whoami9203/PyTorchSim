@@ -75,22 +75,36 @@ void SsdTraceManager::open_trace() {
   namespace fs = std::filesystem;
 
   const char* continue_path_env = std::getenv("TOGSIM_SSD_TRACE_CONTINUE_PATH");
-  if (continue_path_env && std::string(continue_path_env).size() && fs::exists(continue_path_env)) {
-    // Continuing a previous batch's trace file (see the multi-kernel
-    // batching path in Simulator/simulator.py's TOGSimulator, which restarts
-    // this process once per DEVICE_SYNC-bounded batch) -- append instead of
-    // starting a new numbered file, so ssd_traces/.../dma_trace_N.csv stays
-    // one continuous file across batches instead of fragmenting into one
-    // file per batch.
+  if (continue_path_env && std::string(continue_path_env).size()) {
+    // Continuing a shared trace file across multiple fresh TOGSim processes
+    // -- see the multi-kernel batching path in Simulator/simulator.py's
+    // TOGSimulator, which restarts this process once per DEVICE_SYNC-bounded
+    // batch, *and* (now that SSD's phase-2 NoC always runs -- see
+    // CONFIG_TOGSIM_LEGOSIM_SSD's comment) once per interchiplet round
+    // within a single batch. Python reserves this exact path up front (see
+    // TOGSimulator._flush_batch()'s _reserve_ssd_trace_path()) before the
+    // very first process in the whole chain ever runs, so every process
+    // that follows -- across every round, across every batch -- sees the
+    // same env var value and can append to the one shared file, whether or
+    // not it exists yet at the time this particular process starts: the
+    // *first* process to reach here creates it (with header), everyone
+    // after that just appends. This is what keeps
+    // ssd_traces/.../dma_trace_N.csv one continuous file across all of them
+    // instead of fragmenting into one file per process.
     _trace_path = continue_path_env;
+    fs::path out_path(_trace_path);
+    fs::create_directories(out_path.parent_path());
+    const bool already_exists = fs::exists(_trace_path);
     _trace_file.open(_trace_path, std::ios::out | std::ios::app);
     if (!_trace_file.is_open()) {
-      spdlog::error("[SSD] Failed to append to continued trace file: {}", _trace_path);
+      spdlog::error("[SSD] Failed to open continued trace file: {}", _trace_path);
       _enabled = false;
       return;
     }
-    // No header write -- the file already has one from when open_trace()
-    // first created it for the earliest batch in this chain.
+    if (!already_exists) {
+      _trace_file << "seq,op,addr,len,timestamp_ns,core_id,inst_id,addr_name\n";
+      _trace_file.flush();
+    }
     return;
   }
 
