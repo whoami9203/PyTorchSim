@@ -20,6 +20,22 @@
 // (interchiplet's getEndCycle()) instead of being computed against a fixed
 // baseline every time.
 //
+// This also already gives every core sharing this one simlet process (all
+// requests funnel through the one DramLegoSimLink singleton -- see its own
+// comment) correct FCFS queueing on the shared channel, with no extra
+// bookkeeping needed here: timeNow is passed as the cycle argument to every
+// readSync() call below, and interchiplet's own resolution
+// (net_delay.h's DelayList::getEndCycle(), "normal communication" branch)
+// clamps a request's resolved arrival to max(its own declared cycle +
+// transport delay, that timeNow) -- i.e. never earlier than when the
+// channel finished the previous request. A `channel_free_at` variable
+// shadowing timeNow was tried here and reverted: it was provably always
+// equal to timeNow at the point it would matter (proven by an isolated
+// interchiplet-level A/B test sending two overlapping requests: identical
+// resolved cycles with and without it), so it was dead weight that only
+// made the already-correct queueing look like it depended on this file
+// instead of on interchiplet's own protocol.
+//
 // argv: <self_x> <self_y> <peer_x> <peer_y> [bandwidth_gbps] [base_latency_ns]
 // Defaults match the (0,0)=NPU / (2,0)=DRAM convention used elsewhere in
 // this integration (ssd_simlet occupies (1,0), so dram_simlet can run
@@ -71,7 +87,9 @@ int main(int argc, char** argv) {
 
   // Current known simulated time for this chiplet, threaded through
   // readSync/writeSync's cycle argument -- same role as DDR.cpp/HBM.cpp's
-  // local `timeNow`.
+  // local `timeNow`. This is also what gives every core sharing this one
+  // process correct FCFS queueing on the shared channel for free -- see
+  // the file comment.
   InterChiplet::TimeType timeNow = 1;
 
   while (true) {
@@ -92,12 +110,14 @@ int main(int argc, char** argv) {
 
       // Advance timeNow past the modeled DRAM access latency, added on top
       // of wherever the request actually landed (time_end -- informed by
-      // phase-2 NoC delay when a real NoC simlet is plugged in). Mirrors
-      // DDR.cpp/HBM.cpp's `timeNow = true_time + time_end`. latency_ns is
-      // used directly as a cycle count here, the same placeholder
-      // convention DDR.cpp uses for its own fixed constant; this internal
-      // timeline is independent of the ns-to-core-cycle conversion DMA.cc
-      // applies to resp.latency_ns on the TOGSim side.
+      // phase-2 NoC delay when a real NoC simlet is plugged in, and already
+      // clamped by interchiplet to be no earlier than the channel's own
+      // previous timeNow -- see the file comment). Mirrors DDR.cpp/HBM.cpp's
+      // `timeNow = true_time + time_end`. latency_ns is used directly as a
+      // cycle count here, the same placeholder convention DDR.cpp uses for
+      // its own fixed constant; this internal timeline is independent of
+      // the ns-to-core-cycle conversion DMA.cc applies to resp.latency_ns
+      // on the TOGSim side.
       timeNow = static_cast<InterChiplet::TimeType>(resp.latency_ns) + time_end;
     } else {
       resp.latency_ns = 0;

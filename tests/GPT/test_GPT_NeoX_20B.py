@@ -181,6 +181,22 @@ def _dump_module_weight_ranges(module, name_prefix):
         [sys.executable, os.path.join(os.path.dirname(__file__), "../../merge_weight_ranges.py")],
         check=True,
     )
+    # Rebuild the live bridge's DRAM-addr -> SSD-offset table for whichever
+    # layer is now current (see sim/legosim_pytorchsim_main.cc's file
+    # comment: it matches requests by DRAM address, not by name, so it needs
+    # dram_base/dram_end straight from the trace we just wrote). GPT-NeoX
+    # dumps use "gpt_neox.layers.<N>." rather than Llama's "model.layers.<N>.",
+    # hence --name-prefix instead of relying on the script's default.
+    subprocess.run(
+        [
+            sys.executable,
+            os.path.join(os.path.dirname(__file__), "../../build_layer_ssd_offset_map.py"),
+            "--from-trace", out_path,
+            "--name-prefix", f"{name_prefix}.",
+            "--pytorchsim-offsets-tsv", os.path.join(out_dir, "ssd_offsets.tsv"),
+        ],
+        check=True,
+    )
 
 
 def _prelude(base_model, input_ids, attention_mask, past_key_values, cache_position):

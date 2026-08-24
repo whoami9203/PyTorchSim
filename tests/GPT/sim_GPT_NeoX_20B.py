@@ -74,14 +74,38 @@ def _compile_for_npu(model, config):
     return compiled_prelude, compiled_epilogue
 
 
-def _run_forward(model, loader, input_ids, attention_mask, past_key_values, device, torch_dtype, config, npu):
+def _run_forward(model, loader, input_ids, attention_mask, past_key_values, device, torch_dtype, config, npu,
+                  use_togsimulator=False):
     if not npu:
         return _forward_streamed(model, loader, input_ids, attention_mask, past_key_values, device, torch_dtype)
     compiled_prelude, compiled_epilogue = _compile_for_npu(model, config)
-    return _forward_streamed_npu(
-        model, loader, compiled_prelude, compiled_epilogue,
-        input_ids, attention_mask, past_key_values, device, torch_dtype,
-    )
+    if not use_togsimulator:
+        # Every kernel dispatches through TOGSimulator.run_standalone() (a
+        # fresh TOGSim process per kernel) -- this is the default here since
+        # that's this script's original behavior; pass use_togsimulator=True
+        # (or --togsimulator on the CLI) for the persistent-process path
+        # instead, same option as sim_llama2_7B.py's.
+        return _forward_streamed_npu(
+            model, loader, compiled_prelude, compiled_epilogue,
+            input_ids, attention_mask, past_key_values, device, torch_dtype,
+        )
+    # Wrap the actual forward call (not the torch.compile() calls above, which
+    # are lazy and don't dispatch anything by themselves) in a TOGSimulator
+    # context so this phase's kernels dispatch through
+    # TOGSimulator.launch_kernel() into a single persistent TOGSim process
+    # (Simulator/simulator.py), instead of TOGSimulator.run_standalone()
+    # spawning a fresh TOGSim process per kernel -- see sim_llama2_7B.py's
+    # identical option. extension_codecache.py's run_kernel_simulation only
+    # takes the persistent-process path when torch.npu.get_tog_simulator()
+    # is non-None, which requires an active TOGSimulator context. Covers
+    # run_prefill/run_decode/run_compare alike, since they all call through
+    # here for their NPU dispatch.
+    from Simulator.simulator import TOGSimulator
+    with TOGSimulator():
+        return _forward_streamed_npu(
+            model, loader, compiled_prelude, compiled_epilogue,
+            input_ids, attention_mask, past_key_values, device, torch_dtype,
+        )
 
 
 def _build_phase_inputs(phase, config, batch, length, seed, torch_dtype, device):
@@ -108,26 +132,28 @@ def _build_phase_inputs(phase, config, batch, length, seed, torch_dtype, device)
 
 
 @torch.no_grad()
-def run_prefill(model_id, seq_len, batch, dtype, num_layers, device, npu, seed):
+def run_prefill(model_id, seq_len, batch, dtype, num_layers, device, npu, seed, use_togsimulator=False):
     label = "NPU" if npu else "CPU"
     print(f"\n[Running GPT-NeoX-20B PREFILL-only phase, {label}, seq_len={seq_len}, batch={batch}]")
     model, config, torch_dtype, loader = _build_model_and_loader(model_id, dtype, device, num_layers)
     input_ids, attention_mask, past_key_values = _build_phase_inputs(
         "prefill", config, batch, seq_len, seed, torch_dtype, device
     )
-    logits = _run_forward(model, loader, input_ids, attention_mask, past_key_values, device, torch_dtype, config, npu)
+    logits = _run_forward(model, loader, input_ids, attention_mask, past_key_values, device, torch_dtype, config, npu,
+                           use_togsimulator)
     print(f"[Prefill] done. logits shape={tuple(logits.shape)}")
 
 
 @torch.no_grad()
-def run_decode(model_id, context_len, batch, dtype, num_layers, device, npu, seed):
+def run_decode(model_id, context_len, batch, dtype, num_layers, device, npu, seed, use_togsimulator=False):
     label = "NPU" if npu else "CPU"
     print(f"\n[Running GPT-NeoX-20B DECODE-only phase, {label}, context_len={context_len}, batch={batch}]")
     model, config, torch_dtype, loader = _build_model_and_loader(model_id, dtype, device, num_layers)
     input_ids, attention_mask, past_key_values = _build_phase_inputs(
         "decode", config, batch, context_len, seed, torch_dtype, device
     )
-    logits = _run_forward(model, loader, input_ids, attention_mask, past_key_values, device, torch_dtype, config, npu)
+    logits = _run_forward(model, loader, input_ids, attention_mask, past_key_values, device, torch_dtype, config, npu,
+                           use_togsimulator)
     print(f"[Decode] done. logits shape={tuple(logits.shape)}")
 
 
@@ -189,7 +215,7 @@ def _place_phase_content(phase, config, batch, length, input_ids, kv_fill, torch
 
 
 @torch.no_grad()
-def run_compare(model_id, phase, length, batch, dtype, num_layers, seed, rtol=1e-3, atol=1e-3):
+def run_compare(model_id, phase, length, batch, dtype, num_layers, seed, rtol=1e-3, atol=1e-3, use_togsimulator=False):
     """Runs the same phase (identical random input ids and, for decode, identical random KV
     cache, generated exactly once and placed on each device) on CPU and NPU, then diffs the
     resulting logits. Only meaningful with pytorchsim_functional_mode enabled: with it off the
@@ -215,7 +241,8 @@ def run_compare(model_id, phase, length, batch, dtype, num_layers, seed, rtol=1e
         phase, config, batch, length, base_input_ids, base_kv_fill, torch_dtype, npu_device
     )
     npu_logits = _run_forward(
-        model, loader, input_ids, attention_mask, past_key_values, npu_device, torch_dtype, config, npu=True
+        model, loader, input_ids, attention_mask, past_key_values, npu_device, torch_dtype, config, npu=True,
+        use_togsimulator=use_togsimulator,
     )
 
     _report_comparison(f"{phase} logits (CPU vs NPU)", npu_logits, cpu_logits, rtol=rtol, atol=atol)
@@ -247,6 +274,12 @@ if __name__ == "__main__":
                               "NPU output is all zeros and the comparison is meaningless.")
     parser.add_argument("--rtol", type=float, default=1e-3)
     parser.add_argument("--atol", type=float, default=1e-3)
+    parser.add_argument("--togsimulator", action=argparse.BooleanOptionalAction, default=False,
+                         help="Wrap the NPU forward in a TOGSimulator() context so its kernels "
+                              "dispatch through a single persistent TOGSim process instead of "
+                              "TOGSimulator.run_standalone() spawning a fresh TOGSim process per "
+                              "kernel. Default off (this script's original behavior); pass "
+                              "--togsimulator to opt in. No effect without --npu.")
     args = parser.parse_args()
 
     sys.path.append(os.environ.get("PYTORCHSIM_ROOT_PATH", "/workspace/PyTorchSim"))
@@ -255,13 +288,15 @@ if __name__ == "__main__":
         length = args.seq_len if args.phase == "prefill" else args.context_len
         run_compare(
             args.hf_model, args.phase, length, args.batch, args.dtype, args.num_layers,
-            args.seed, args.rtol, args.atol,
+            args.seed, args.rtol, args.atol, use_togsimulator=args.togsimulator,
         )
     else:
         device = torch.device("npu:0") if args.npu else torch.device("cpu")
         if args.npu:
             torch.compiler.is_compiling = lambda: True  # FIXME. How to fix this?
         if args.phase == "prefill":
-            run_prefill(args.hf_model, args.seq_len, args.batch, args.dtype, args.num_layers, device, args.npu, args.seed)
+            run_prefill(args.hf_model, args.seq_len, args.batch, args.dtype, args.num_layers, device, args.npu, args.seed,
+                        use_togsimulator=args.togsimulator)
         else:
-            run_decode(args.hf_model, args.context_len, args.batch, args.dtype, args.num_layers, device, args.npu, args.seed)
+            run_decode(args.hf_model, args.context_len, args.batch, args.dtype, args.num_layers, device, args.npu, args.seed,
+                       use_togsimulator=args.togsimulator)

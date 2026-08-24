@@ -30,28 +30,28 @@ bash cleanup_results.sh 1
 執行模擬
 ```bash
 # 官方範例
-python3 test/Llama/test_llama.py
+python3 tests/Llama/test_llama.py
 
 # sim開頭: 跑random input
 # TinyLLaMA
 #python3 test/Llama/test_tinyllama.py --npu --phase [decode/prefill] --num_layers [i] --seq_len [default: 500 (for prefill)] --context_len [default: 500 (for decode)]
-python3 test/Llama/sim_tinyllama.py --npu --phase decode --num_layers 1
+python3 tests/Llama/sim_tinyllama.py --npu --phase decode --num_layers 1
 
 # LLaMA2-7B
-python3 test/Llama/sim_llama2_7B.py --npu --phase decode --num_layers 1
+python3 tests/Llama/sim_llama2_7B.py --npu --phase decode --num_layers 1
 
 # GPT_NeoX-20B
-python3 test/GPT/sim_GPT_NeoX_20B.py --npu --phase decode --num_layers 1
+python3 tests/GPT/sim_GPT_NeoX_20B.py --npu --phase decode --num_layers 1
 
 # test開頭: 跑實際prompt
 #python3 test/Llama/test_tinyllama.py --npu --prompt [ex. Machine learning is a useful tool that] --max_new_tokens [default: 1]
-python3 test/Llama/test_tinyllama.py --npu 
+python3 tests/Llama/test_tinyllama.py --npu 
 
 # LLaMA2-7B
-python3 test/Llama/test_llama2_7B.py --npu
+python3 tests/Llama/test_llama2_7B.py --npu
 
 # GPT_NeoX-20B
-python3 test/GPT/test_GPT_NeoX_20B.py --npu
+python3 tests/GPT/test_GPT_NeoX_20B.py --npu
 ``` 
 
 輸出總cycle數

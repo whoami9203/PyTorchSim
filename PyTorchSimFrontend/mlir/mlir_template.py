@@ -114,6 +114,7 @@ class MLIRTemplateKernel(MLIRKernel, BaseMLIRHardwareInfo):
         self.kernel_arg_attributes = kernel_arg_attributes
         self.render_hooks = OrderedDict()  # Stores {key: (priority, hook)}
         self.dma_op_counter = itertools.count()  # Add counter for unique DMA op keys
+        self.zero_init_counter = itertools.count()  # Add counter for unique zero-init SSA names
         self.buffer_names = dict()
         self.render_options = dict()
         self.tile_size = []
@@ -1005,6 +1006,32 @@ class MLIRTemplateKernel(MLIRKernel, BaseMLIRHardwareInfo):
     def get_spad_size_per_lane(self, tile_m, tile_n):
         size = tile_m * ((tile_n + self.vector_lane - 1) // self.vector_lane)
         return max(size, 2) # vector load/store
+
+    def zero_init_store(self, buffer_var: str, tile_shape: str, tile_m, tile_n, dtype, indent_size=0):
+        """Zero-fills a [tile_m, tile_n] SRAM tile via a loop of vector_lane-wide vector stores.
+
+        A single flat `vector<(tile_m * ceil(tile_n/vector_lane))xdtype>` store (one monolithic
+        op covering the whole tile, as get_spad_size_per_lane()'s value was previously used for
+        directly) can end up with a non-power-of-two element count once TILE_M/TILE_N aren't
+        power-of-two-friendly -- e.g. tile_m=256, tile_n=6400, vector_lane=32 gives
+        256 * ceil(6400/32) = 51200 = 2^11 * 25. LLVM's RISC-V vector type legalizer can't always
+        split such an odd-factored fixed vector type down to a hardware-legal width and aborts
+        (SmallVector grow overflow in SplitVecRes_BUILD_VECTOR). Chunking the store into
+        vector_lane-wide (a power of two) pieces keeps every emitted vector type splittable.
+        """
+        lane = self.vector_lane
+        n_padded = ((tile_n + lane - 1) // lane) * lane
+        zid = next(self.zero_init_counter)
+        lines = [
+            f"%t_zero{zid} = arith.constant dense<0.0> : vector<{lane}x{dtype}>",
+            f"affine.for %t_zi{zid} = 0 to {tile_m} {{",
+            f"  affine.for %t_zj{zid} = 0 to {n_padded} step {lane} {{",
+            f"    affine.vector_store %t_zero{zid}, %{buffer_var}[%t_zi{zid}, %t_zj{zid}] : {tile_shape}, vector<{lane}x{dtype}>",
+            "  }",
+            "}",
+        ]
+        code = "\n".join(lines)
+        return textwrap.indent(code, " " * indent_size).strip()
 
     def load_epilogue(self, name: str, index: sympy.Expr):
         dram_var = self.kernel_group.args.input(name)

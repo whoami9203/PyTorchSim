@@ -19,6 +19,15 @@
 // pairing (interchiplet's getEndCycle()) instead of being computed against
 // a fixed baseline every time.
 //
+// This also already gives every core sharing this one simlet process (all
+// weight-read requests funnel through the one SsdLegoSimLink singleton --
+// see its own comment) correct FCFS queueing on the shared channel, with no
+// extra bookkeeping needed here -- see dram_simlet.cpp's file comment for
+// the full explanation (interchiplet's own getEndCycle() clamp against
+// timeNow already does this; a channel_free_at variable shadowing timeNow
+// was tried and reverted after proving via an isolated A/B test that it
+// changed nothing).
+//
 // argv: <self_x> <self_y> <peer_x> <peer_y> [bandwidth_gbps] [base_latency_ns]
 // Defaults match the (0,0)=NPU / (1,0)=DRAM convention used elsewhere in
 // this integration (e.g. tests/Llama/test_legosim_integration.py).
@@ -69,7 +78,9 @@ int main(int argc, char** argv) {
 
   // Current known simulated time for this chiplet, threaded through
   // readSync/writeSync's cycle argument -- same role as
-  // DDR.cpp/HBM.cpp/dram_simlet.cpp's local `timeNow`.
+  // DDR.cpp/HBM.cpp/dram_simlet.cpp's local `timeNow`. This is also what
+  // gives every core sharing this one process correct FCFS queueing on the
+  // shared channel for free -- see the file comment.
   InterChiplet::TimeType timeNow = 1;
 
   while (true) {
@@ -90,7 +101,9 @@ int main(int argc, char** argv) {
 
       // Advance timeNow past the modeled latency, added on top of wherever
       // the request actually landed (time_end -- informed by the phase-2
-      // NoC delay). Mirrors dram_simlet.cpp's identical update.
+      // NoC delay, and already clamped by interchiplet to be no earlier
+      // than the channel's own previous timeNow -- see the file comment).
+      // Mirrors dram_simlet.cpp's identical update.
       timeNow = static_cast<InterChiplet::TimeType>(resp.latency_ns) + time_end;
     } else {
       resp.latency_ns = 0;

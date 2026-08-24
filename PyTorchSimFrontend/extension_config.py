@@ -157,6 +157,42 @@ def __getattr__(name):
     if name == "CONFIG_LEGOSIM_SSD_BASE_LATENCY_NS":
         return float(os.environ.get("TOGSIM_LEGOSIM_SSD_BASE_LATENCY_NS", "100.0"))
 
+    # Which phase1 process answers the SSD path above: "simplessd" (default)
+    # runs every weight read through a real cycle-accurate SimpleSSD engine
+    # (simpleSSD-lego/SimpleSSD-Standalone/sim/legosim_pytorchsim_main.cc) --
+    # actual modeled NAND/FTL/cache timing instead of
+    # CONFIG_LEGOSIM_SSD_BANDWIDTH_GBPS/_BASE_LATENCY_NS's formula. "formula"
+    # falls back to the original ssd_simlet.cpp placeholder (those two
+    # bandwidth/base-latency knobs only apply in that mode) -- keep this
+    # around as a fast sanity-check fallback that doesn't need a real
+    # SimpleSSD config or an offsets table.
+    if name == "CONFIG_LEGOSIM_SSD_BACKEND":
+        return os.environ.get("TOGSIM_LEGOSIM_SSD_BACKEND", "simplessd")
+    if name == "CONFIG_LEGOSIM_SSD_BIN":
+        # NOTE: CONFIG_LEGOSIM_ROOT is itself only defined via this same
+        # __getattr__ (not a real module global), so it can't be referenced
+        # as a bare name here -- re-resolve SIMULATOR_ROOT the same way its
+        # own branch does instead of cross-referencing it.
+        legosim_root = os.environ.get("SIMULATOR_ROOT", "/workspace/legomerged/eclab_legosim")
+        return os.environ.get(
+            "TOGSIM_LEGOSIM_SSD_BIN",
+            os.path.join(legosim_root, "simpleSSD-lego/SimpleSSD-Standalone/simplessd-pytorchsim"),
+        )
+    if name == "CONFIG_LEGOSIM_SSD_SIM_CONFIG":
+        legosim_root = os.environ.get("SIMULATOR_ROOT", "/workspace/legomerged/eclab_legosim")
+        return os.environ.get(
+            "TOGSIM_LEGOSIM_SSD_SIM_CONFIG",
+            os.path.join(legosim_root, "simpleSSD-lego/SimpleSSD-Standalone/config/sample.cfg"),
+        )
+    if name == "CONFIG_LEGOSIM_SSD_DEVICE_CONFIG":
+        legosim_root = os.environ.get("SIMULATOR_ROOT", "/workspace/legomerged/eclab_legosim")
+        return os.environ.get(
+            "TOGSIM_LEGOSIM_SSD_DEVICE_CONFIG",
+            os.path.join(
+                legosim_root, "simpleSSD-lego/SimpleSSD-Standalone/simplessd/config/sample.cfg"
+            ),
+        )
+
     # LegoSim live DRAM+interconnect latency integration (see
     # TOGSim/include/DramLegoSimLink.h). Unlike the SSD path above (weight
     # reads only), this is a catch-all covering every DMA access -- reads

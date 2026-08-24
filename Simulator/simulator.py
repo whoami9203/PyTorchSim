@@ -421,7 +421,7 @@ class TOGSimulator():
             )
             phase1_basenames = ["Simulator"]
             if use_legosim_ssd:
-                phase1_basenames.append("ssd_simlet")
+                phase1_basenames.append(TOGSimulator._ssd_phase1_basename())
             if use_legosim_dram:
                 phase1_basenames.append("dram_simlet")
             phase2_basenames = ["popnet"] if use_noc else ["true"]
@@ -645,6 +645,18 @@ class TOGSimulator():
         return cmd
 
     @staticmethod
+    def _ssd_phase1_basename():
+        """Basename of whichever binary _build_legosim_yaml actually launches for
+        the SSD phase1 process, matching CONFIG_LEGOSIM_SSD_BACKEND -- needed by
+        both _split_interchiplet_log() call sites' phase1_basenames list, which
+        matches against interchiplet's own "Start simulation process ... Command:
+        <path>" lines (the real launched binary), not the "log" field.
+        """
+        if extension_config.CONFIG_LEGOSIM_SSD_BACKEND == "formula":
+            return "ssd_simlet"
+        return os.path.basename(extension_config.CONFIG_LEGOSIM_SSD_BIN)
+
+    @staticmethod
     def _build_legosim_yaml(togsim_bin, config, trace_file_path, run_dir, log_level="",
                              use_ssd=True, use_dram=False, core_freq_mhz=None,
                              extra_togsim_args=None):
@@ -702,16 +714,55 @@ class TOGSimulator():
         ]
 
         if use_ssd:
-            ssd_bin = os.path.join(os.path.dirname(togsim_bin), "ssd_simlet")
-            bandwidth = extension_config.CONFIG_LEGOSIM_SSD_BANDWIDTH_GBPS
-            base_latency = extension_config.CONFIG_LEGOSIM_SSD_BASE_LATENCY_NS
-            phase1.append({
-                "cmd": str(ssd_bin),
-                "args": ["1", "0", "0", "0", str(bandwidth), str(base_latency)],
-                "log": "ssd_simlet.log",
-                "is_to_stdout": False,
-                "clock_rate": 1.0,
-            })
+            backend = extension_config.CONFIG_LEGOSIM_SSD_BACKEND
+            if backend == "formula":
+                ssd_bin = os.path.join(os.path.dirname(togsim_bin), "ssd_simlet")
+                bandwidth = extension_config.CONFIG_LEGOSIM_SSD_BANDWIDTH_GBPS
+                base_latency = extension_config.CONFIG_LEGOSIM_SSD_BASE_LATENCY_NS
+                phase1.append({
+                    "cmd": str(ssd_bin),
+                    "args": ["1", "0", "0", "0", str(bandwidth), str(base_latency)],
+                    "log": "ssd_simlet.log",
+                    "is_to_stdout": False,
+                    "clock_rate": 1.0,
+                })
+            elif backend == "simplessd":
+                # Real cycle-accurate SimpleSSD engine instead of ssd_simlet's
+                # formula -- see sim/legosim_pytorchsim_main.cc. It needs a
+                # <name> <dram_base> <dram_end> <ssd_offset> <ssd_length> table
+                # for whichever layer is currently loaded, written into the
+                # same TOGSIM_SSD_TRACE_DIR/_NAME directory
+                # _dump_module_weight_ranges() writes model_weight_ranges.txt
+                # into (see that function's build_layer_ssd_offset_map.py
+                # subprocess call) -- so it must already exist by the time any
+                # batch for that layer's kernels flushes.
+                trace_dir = os.environ.get("TOGSIM_SSD_TRACE_DIR")
+                trace_name = os.environ.get("TOGSIM_SSD_TRACE_NAME")
+                if not trace_dir or not trace_name:
+                    raise RuntimeError(
+                        "CONFIG_LEGOSIM_SSD_BACKEND=simplessd requires "
+                        "TOGSIM_SSD_TRACE_DIR and TOGSIM_SSD_TRACE_NAME to be set "
+                        "(same vars _dump_module_weight_ranges() needs) so the live "
+                        "bridge can find its offsets table."
+                    )
+                offsets_path = os.path.join(trace_dir, trace_name, "ssd_offsets.tsv")
+                phase1.append({
+                    "cmd": str(extension_config.CONFIG_LEGOSIM_SSD_BIN),
+                    "args": [
+                        str(extension_config.CONFIG_LEGOSIM_SSD_SIM_CONFIG),
+                        str(extension_config.CONFIG_LEGOSIM_SSD_DEVICE_CONFIG),
+                        offsets_path,
+                        "1", "0", "0", "0",
+                    ],
+                    "log": "ssd_simlet.log",
+                    "is_to_stdout": False,
+                    "clock_rate": 1.0,
+                })
+            else:
+                raise ValueError(
+                    f"Unknown CONFIG_LEGOSIM_SSD_BACKEND '{backend}' (expected "
+                    "'simplessd' or 'formula')"
+                )
 
         if use_dram:
             dram_bin = os.path.join(os.path.dirname(togsim_bin), "dram_simlet")
@@ -1066,7 +1117,7 @@ class TOGSimulator():
                 # phase1/phase2 command list exactly.
                 phase1_basenames = ["Simulator"]
                 if use_legosim_ssd:
-                    phase1_basenames.append("ssd_simlet")
+                    phase1_basenames.append(TOGSimulator._ssd_phase1_basename())
                 if use_legosim_dram:
                     phase1_basenames.append("dram_simlet")
                 phase2_basenames = ["popnet"] if use_noc else ["true"]
