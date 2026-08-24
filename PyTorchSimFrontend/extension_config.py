@@ -168,29 +168,22 @@ def __getattr__(name):
     # SimpleSSD config or an offsets table.
     if name == "CONFIG_LEGOSIM_SSD_BACKEND":
         return os.environ.get("TOGSIM_LEGOSIM_SSD_BACKEND", "simplessd")
-    if name == "CONFIG_LEGOSIM_SSD_BIN":
+    if name == "CONFIG_LEGOSIM_SSD_YAML":
+        # Path to one interchiplet phase1 process entry (cmd/args/log/
+        # clock_rate) for the "simplessd" backend -- _build_legosim_yaml
+        # loads this file rather than constructing the entry inline, so a
+        # different SimpleSSD build/config/coordinates only needs a
+        # different yaml, not a code change. See
+        # configs/legosim/simplessd.yml (the default) for the expected
+        # shape and the {offsets_path} substitution it documents.
         # NOTE: CONFIG_LEGOSIM_ROOT is itself only defined via this same
         # __getattr__ (not a real module global), so it can't be referenced
         # as a bare name here -- re-resolve SIMULATOR_ROOT the same way its
         # own branch does instead of cross-referencing it.
         legosim_root = os.environ.get("SIMULATOR_ROOT", "/workspace/legomerged/eclab_legosim")
         return os.environ.get(
-            "TOGSIM_LEGOSIM_SSD_BIN",
-            os.path.join(legosim_root, "simpleSSD-lego/SimpleSSD-Standalone/simplessd-pytorchsim"),
-        )
-    if name == "CONFIG_LEGOSIM_SSD_SIM_CONFIG":
-        legosim_root = os.environ.get("SIMULATOR_ROOT", "/workspace/legomerged/eclab_legosim")
-        return os.environ.get(
-            "TOGSIM_LEGOSIM_SSD_SIM_CONFIG",
-            os.path.join(legosim_root, "simpleSSD-lego/SimpleSSD-Standalone/config/sample.cfg"),
-        )
-    if name == "CONFIG_LEGOSIM_SSD_DEVICE_CONFIG":
-        legosim_root = os.environ.get("SIMULATOR_ROOT", "/workspace/legomerged/eclab_legosim")
-        return os.environ.get(
-            "TOGSIM_LEGOSIM_SSD_DEVICE_CONFIG",
-            os.path.join(
-                legosim_root, "simpleSSD-lego/SimpleSSD-Standalone/simplessd/config/sample.cfg"
-            ),
+            "TOGSIM_LEGOSIM_SSD_YAML",
+            os.path.join(legosim_root, "PyTorchSim/configs/legosim/simplessd.yml"),
         )
 
     # LegoSim live DRAM+interconnect latency integration (see

@@ -34,16 +34,17 @@ python3 tests/Llama/test_llama.py
 
 # sim開頭: 跑random input
 # TinyLLaMA
-#python3 test/Llama/test_tinyllama.py --npu --phase [decode/prefill] --num_layers [i] --seq_len [default: 500 (for prefill)] --context_len [default: 500 (for decode)]
-python3 tests/Llama/sim_tinyllama.py --npu --phase decode --num_layers 1
+#python3 test/Llama/test_tinyllama.py --npu --phase [decode/prefill] --num_layers [i] --seq_len [default: 500 (for prefill)] --context_len [default: 500 (for decode)] --dtype [default: float32] --ssd-backend [formula/simplessd]
+# setup_env_var.sh 有設SSD simlet為1 --ssd-backend 才有實際作用
+python3 tests/Llama/sim_tinyllama.py --npu --phase decode --num_layers 1 --dtype float16
 
 # LLaMA2-7B
-python3 tests/Llama/sim_llama2_7B.py --npu --phase decode --num_layers 1
+python3 tests/Llama/sim_llama2_7B.py --npu --phase decode --num_layers 1 --dtype float16
 
 # GPT_NeoX-20B
-python3 tests/GPT/sim_GPT_NeoX_20B.py --npu --phase decode --num_layers 1
+python3 tests/GPT/sim_GPT_NeoX_20B.py --npu --phase decode --num_layers 1 --dtype float16
 
-# test開頭: 跑實際prompt
+# test開頭: 跑實際prompt (沒開functional mode效果跟sim開頭一樣)
 #python3 test/Llama/test_tinyllama.py --npu --prompt [ex. Machine learning is a useful tool that] --max_new_tokens [default: 1]
 python3 tests/Llama/test_tinyllama.py --npu 
 

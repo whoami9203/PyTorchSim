@@ -280,7 +280,27 @@ if __name__ == "__main__":
                               "TOGSimulator.run_standalone() spawning a fresh TOGSim process per "
                               "kernel. Default off (this script's original behavior); pass "
                               "--togsimulator to opt in. No effect without --npu.")
+    parser.add_argument("--ssd-backend", choices=["simplessd", "formula"], default=None,
+                         help="Which LegoSim SSD phase1 process to use when TOGSIM_LEGOSIM_SSD=1 "
+                              "(see extension_config.py's CONFIG_LEGOSIM_SSD_BACKEND): 'simplessd' "
+                              "(the default in extension_config.py) runs every weight read through "
+                              "a real cycle-accurate SimpleSSD engine; 'formula' falls back to the "
+                              "original ssd_simlet.cpp bandwidth+base-latency placeholder. Sets the "
+                              "TOGSIM_LEGOSIM_SSD_BACKEND env var; leave unset to use whatever's "
+                              "already in the environment (or the default).")
+    parser.add_argument("--ssd-yaml", type=str, default=None,
+                         help="Path to the interchiplet phase1 process entry (cmd/args/log/"
+                              "clock_rate) used for the 'simplessd' --ssd-backend -- see "
+                              "configs/legosim/simplessd.yml (the default) for the expected shape. "
+                              "Only takes effect with --ssd-backend simplessd (or "
+                              "TOGSIM_LEGOSIM_SSD_BACKEND=simplessd). Sets the "
+                              "TOGSIM_LEGOSIM_SSD_YAML env var; leave unset to use the default.")
     args = parser.parse_args()
+
+    if args.ssd_backend:
+        os.environ["TOGSIM_LEGOSIM_SSD_BACKEND"] = args.ssd_backend
+    if args.ssd_yaml:
+        os.environ["TOGSIM_LEGOSIM_SSD_YAML"] = args.ssd_yaml
 
     sys.path.append(os.environ.get("PYTORCHSIM_ROOT_PATH", "/workspace/PyTorchSim"))
 

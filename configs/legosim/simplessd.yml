@@ -1,0 +1,36 @@
+# Default LegoSim SSD phase1 process definition for the "simplessd" backend
+# (see PyTorchSimFrontend/extension_config.py's CONFIG_LEGOSIM_SSD_BACKEND /
+# CONFIG_LEGOSIM_SSD_YAML, and Simulator/simulator.py's _build_legosim_yaml).
+#
+# This is one interchiplet phase1 process entry (cmd/args/log/clock_rate),
+# not a full legosim.yml -- _build_legosim_yaml loads this file and appends
+# it to the phase1 list it's already building (TOGSim + optionally DRAM),
+# after substituting {offsets_path} in `args` with the per-run
+# ssd_offsets.tsv path (computed from TOGSIM_SSD_TRACE_DIR/
+# TOGSIM_SSD_TRACE_NAME -- see _dump_module_weight_ranges() in
+# tests/Llama/test_llama2_7B.py and friends, which regenerates that file
+# every time a layer loads).
+#
+# `args` order matches simplessd-pytorchsim's own argv contract (see
+# simpleSSD-lego/SimpleSSD-Standalone/sim/legosim_pytorchsim_main.cc):
+#   <Simulation config> <SimpleSSD config> <offsets file> <self_x> <self_y> <peer_x> <peer_y>
+# self=(1,0) (the SSD chiplet) / peer=(0,0) (TOGSim) match SsdLegoSimLink's
+# own env-var defaults (TOGSIM_LEGOSIM_X/Y, TOGSIM_SSD_LEGOSIM_X/Y).
+#
+# To use a different SimpleSSD build, device config, or coordinates: copy
+# this file, edit your copy, and point CONFIG_LEGOSIM_SSD_YAML (env var
+# TOGSIM_LEGOSIM_SSD_YAML, or --ssd-yaml on the sim_*.py driver scripts) at
+# it instead of editing this default in place.
+
+cmd: /workspace/legomerged/eclab_legosim/simpleSSD-lego/SimpleSSD-Standalone/simplessd-pytorchsim
+args:
+  - /workspace/legomerged/eclab_legosim/simpleSSD-lego/SimpleSSD-Standalone/config/sample.cfg
+  - /workspace/legomerged/eclab_legosim/simpleSSD-lego/SimpleSSD-Standalone/simplessd/config/sample.cfg
+  - "{offsets_path}"
+  - "1"
+  - "0"
+  - "0"
+  - "0"
+log: ssd_simlet.log
+is_to_stdout: false
+clock_rate: 1.0

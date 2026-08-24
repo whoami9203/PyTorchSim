@@ -654,7 +654,9 @@ class TOGSimulator():
         """
         if extension_config.CONFIG_LEGOSIM_SSD_BACKEND == "formula":
             return "ssd_simlet"
-        return os.path.basename(extension_config.CONFIG_LEGOSIM_SSD_BIN)
+        with open(extension_config.CONFIG_LEGOSIM_SSD_YAML) as f:
+            ssd_entry = yaml.safe_load(f)
+        return os.path.basename(ssd_entry["cmd"])
 
     @staticmethod
     def _build_legosim_yaml(togsim_bin, config, trace_file_path, run_dir, log_level="",
@@ -746,18 +748,29 @@ class TOGSimulator():
                         "bridge can find its offsets table."
                     )
                 offsets_path = os.path.join(trace_dir, trace_name, "ssd_offsets.tsv")
-                phase1.append({
-                    "cmd": str(extension_config.CONFIG_LEGOSIM_SSD_BIN),
-                    "args": [
-                        str(extension_config.CONFIG_LEGOSIM_SSD_SIM_CONFIG),
-                        str(extension_config.CONFIG_LEGOSIM_SSD_DEVICE_CONFIG),
-                        offsets_path,
-                        "1", "0", "0", "0",
-                    ],
-                    "log": "ssd_simlet.log",
-                    "is_to_stdout": False,
-                    "clock_rate": 1.0,
-                })
+                # The phase1 process entry itself (cmd/args/log/clock_rate)
+                # comes from an external yaml -- see
+                # CONFIG_LEGOSIM_SSD_YAML/configs/legosim/simplessd.yml --
+                # rather than being built inline here, so a different
+                # SimpleSSD build/config/coordinates only needs a different
+                # yaml file, not a code change. Only {offsets_path} (which
+                # can't be known ahead of time -- it depends on this run's
+                # TOGSIM_SSD_TRACE_DIR/_NAME and whichever layer is current)
+                # gets substituted into `args` at load time.
+                ssd_yaml_path = extension_config.CONFIG_LEGOSIM_SSD_YAML
+                with open(ssd_yaml_path) as f:
+                    ssd_entry = yaml.safe_load(f)
+                missing = [k for k in ("cmd", "args", "log", "clock_rate") if k not in ssd_entry]
+                if missing:
+                    raise ValueError(
+                        f"{ssd_yaml_path} is missing required key(s) {missing} -- expected one "
+                        "interchiplet phase1 process entry, see configs/legosim/simplessd.yml"
+                    )
+                ssd_entry["args"] = [
+                    str(a).format(offsets_path=offsets_path) for a in ssd_entry["args"]
+                ]
+                ssd_entry.setdefault("is_to_stdout", False)
+                phase1.append(ssd_entry)
             else:
                 raise ValueError(
                     f"Unknown CONFIG_LEGOSIM_SSD_BACKEND '{backend}' (expected "
