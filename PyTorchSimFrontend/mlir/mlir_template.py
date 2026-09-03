@@ -1007,27 +1007,42 @@ class MLIRTemplateKernel(MLIRKernel, BaseMLIRHardwareInfo):
         size = tile_m * ((tile_n + self.vector_lane - 1) // self.vector_lane)
         return max(size, 2) # vector load/store
 
-    def zero_init_store(self, buffer_var: str, tile_shape: str, tile_m, tile_n, dtype, indent_size=0):
-        """Zero-fills a [tile_m, tile_n] SRAM tile via a loop of vector_lane-wide vector stores.
+    def zero_init_store(self, buffer_var: str, tile_shape: str, flat_size, dtype, indent_size=0, chunk=None):
+        """Zero-fills the first flat_size elements of buffer_var (reinterpreted as flat 1D) via chunked
+        vector stores. tile_shape must be the buffer's actual declared type (e.g. from
+        Y_tile_desc.get_mlir_shape(DATA_STYPE)), used as the source type for the reinterpret_cast.
 
-        A single flat `vector<(tile_m * ceil(tile_n/vector_lane))xdtype>` store (one monolithic
-        op covering the whole tile, as get_spad_size_per_lane()'s value was previously used for
-        directly) can end up with a non-power-of-two element count once TILE_M/TILE_N aren't
-        power-of-two-friendly -- e.g. tile_m=256, tile_n=6400, vector_lane=32 gives
-        256 * ceil(6400/32) = 51200 = 2^11 * 25. LLVM's RISC-V vector type legalizer can't always
-        split such an odd-factored fixed vector type down to a hardware-legal width and aborts
-        (SmallVector grow overflow in SplitVecRes_BUILD_VECTOR). Chunking the store into
-        vector_lane-wide (a power of two) pieces keeps every emitted vector type splittable.
+        flat_size must be get_spad_size_per_lane(TILE_M, TILE_N) (or equivalent) -- the REAL, physical
+        size of a SPAD-backed buffer. Confirmed directly: the generated global_var.h array declarations
+        (e.g. `uint16_t Y_spad[51200]`) match this exact formula across multiple tile shapes, not
+        TILE_M*TILE_N. The MLIR-declared tile_shape (e.g. TILE_M x TILE_N) is a *logical* shape only,
+        inflated purely so multi-dim indexing type-checks -- the real linked allocation is 1/vector_lane
+        of that, because the vector ISA fans a single store out across vector_lane physical lanes rather
+        than software walking further into a bigger array. An earlier version of this helper walked the
+        full logical TILE_M x TILE_N extent instead of flat_size elements; that writes past the real
+        allocation and corrupts adjacent SPAD memory. gem5/TOGSim's timing-only path doesn't check
+        addresses, so that bug compiled and ran "successfully" under timing simulation despite being
+        memory-unsafe -- it was only caught by Spike's functional simulator, which actually executes the
+        instructions and flagged the out-of-bounds vector store as a stack-address violation.
+
+        A single flat `vector<flat_sizexdtype>` store (one op covering the whole real allocation) can
+        still need tens of thousands of elements -- e.g. flat_size=51200 for the lm_head kernel. LLVM
+        (llc) hits a hard ceiling of 32768 elements for a single vector constant/store: past that,
+        legalizing/CSE-ing the underlying BUILD_VECTOR DAG node overflows a SmallVector size computation
+        and aborts (confirmed by bisection to crash at exactly 32769+ elements, identically for f16 and
+        f32 -- an absolute element-count limit, unrelated to dtype and unrelated to whether the count is
+        a power of two: e.g. 65536, a power of two, also crashes, while 25600, not a power of two, does
+        not). Chunking the store into chunk-wide pieces keeps every emitted vector type far below that
+        ceiling while covering exactly the real allocation, no more and no less.
         """
-        lane = self.vector_lane
-        n_padded = ((tile_n + lane - 1) // lane) * lane
+        lane = chunk if chunk is not None else self.vector_lane
+        n_padded = ((flat_size + lane - 1) // lane) * lane
         zid = next(self.zero_init_counter)
         lines = [
             f"%t_zero{zid} = arith.constant dense<0.0> : vector<{lane}x{dtype}>",
-            f"affine.for %t_zi{zid} = 0 to {tile_m} {{",
-            f"  affine.for %t_zj{zid} = 0 to {n_padded} step {lane} {{",
-            f"    affine.vector_store %t_zero{zid}, %{buffer_var}[%t_zi{zid}, %t_zj{zid}] : {tile_shape}, vector<{lane}x{dtype}>",
-            "  }",
+            f"%t_zflat{zid} = memref.reinterpret_cast %{buffer_var} to offset: [0], sizes: [{flat_size}], strides: [1] : {tile_shape} to memref<{flat_size}x{dtype}, 1>",
+            f"affine.for %t_zi{zid} = 0 to {n_padded} step {lane} {{",
+            f"  affine.vector_store %t_zero{zid}, %t_zflat{zid}[%t_zi{zid}] : memref<{flat_size}x{dtype}, 1>, vector<{lane}x{dtype}>",
             "}",
         ]
         code = "\n".join(lines)

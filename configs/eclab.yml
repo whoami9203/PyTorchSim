@@ -1,6 +1,7 @@
 num_cores: 1
-core_freq_mhz: 700
-core_stats_print_period_cycles: 10000
+core_freq_mhz: 800
+core_stats_print_period_cycles: 100000
+num_systolic_array_per_core: 8
 
 vpu_num_lanes: 32
 vpu_spad_size_kb_per_lane: 256
@@ -13,7 +14,7 @@ dram_stats_print_period_cycles: 100000
 ramulator_config_path: ../configs/ramulator2_configs/LPDDR5X_9600.yaml
 
 icnt_type: booksim2
-icnt_freq_mhz: 700
+icnt_freq_mhz: 800
 icnt_injection_ports_per_core: 8
 booksim_config_path: ../configs/booksim2_configs/fly_c8_m4.icnt
 

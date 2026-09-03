@@ -165,7 +165,7 @@ def main():
     parser.add_argument("--op", type=str, default="matmul", choices=["add", "matmul"],
                          help="add: elementwise NxN (DMA/compute not overlapped, low utilization). "
                               "matmul: weight-streaming GEMM with double-buffered tiling (high utilization).")
-    parser.add_argument("--sizes", type=str, default="64,1024,8192,16384,65536",
+    parser.add_argument("--sizes", type=str, default="1024,8192,16384",
                          help="Comma-separated sizes. For --op add, tensors are NxN. "
                               "For --op matmul, this is K (the swept reduction dim) with M/N fixed small.")
     parser.add_argument("--dtype", type=str, default="float16", choices=["float32", "float16", "bfloat16"])

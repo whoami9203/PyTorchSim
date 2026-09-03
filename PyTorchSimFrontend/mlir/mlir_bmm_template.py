@@ -25,9 +25,6 @@ func.func @{{ KERNEL_NAME }}{{kernel.def_kernel(inputs=[X, W, Bias], outputs=[Y]
   {{ kernel.def_sram_buffer("X", X_tile_desc, indent_size=2) }}
   {{ kernel.def_sram_buffer("W", W_tile_desc, indent_size=2) }}
   {{ kernel.def_sram_buffer("Y", Y_tile_desc, indent_size=2) }}
-  {% if not Bias %}
-  %v0 = arith.constant dense<0.0> : vector<{{ kernel.get_spad_size_per_lane(TILE_M, TILE_N) }}x{{DATA_STYPE}}>
-  {% endif %}
   %c0 = arith.constant 0 : index
   {{ kernel.def_local_vars(indent_size=2) }}
   affine.for %index0 = 0 to {{ B }} {
@@ -39,7 +36,7 @@ func.func @{{ KERNEL_NAME }}{{kernel.def_kernel(inputs=[X, W, Bias], outputs=[Y]
         {% if Bias -%}
         {{ kernel.def_dma_op("MVIN", "Bias", Bias_idx, Y_tile_desc, subtile_size=[1, SUB_TILE_M, SUB_TILE_N], indent_size=8) }}
         {%- else -%}
-        affine.vector_store %v0, %Y_buffer[0, 0, 0] : {{ Y_tile_desc.get_mlir_shape(DATA_STYPE) }}, vector<{{ kernel.get_spad_size_per_lane(TILE_M, TILE_N) }}x{{DATA_STYPE}}>
+        {{ kernel.zero_init_store("Y_buffer", Y_tile_desc.get_mlir_shape(DATA_STYPE), kernel.get_spad_size_per_lane(TILE_M, TILE_N), DATA_STYPE, indent_size=8, chunk=32) }}
         {% endif %}
 
         affine.for %index3 = 0 to {{ K }} step {{ TILE_K }} {
@@ -73,9 +70,6 @@ func.func @{{ KERNEL_NAME }}{{kernel.def_kernel(inputs=[X, W, Bias], outputs=[Y]
   {{ kernel.def_sram_buffer("X", X_tile_desc, indent_size=2) }}
   {{ kernel.def_sram_buffer("W", W_tile_desc, indent_size=2) }}
   {{ kernel.def_sram_buffer("Y", Y_tile_desc, indent_size=2) }}
-  {% if not Bias %}
-  %v0 = arith.constant dense<0.0> : vector<{{ kernel.get_spad_size_per_lane(TILE_M, TILE_N) }}x{{DATA_STYPE}}>
-  {% endif %}
   %c0 = arith.constant 0 : index
   {{ kernel.def_local_vars(indent_size=2) }}
   affine.for %index0 = 0 to {{ B }} {
@@ -87,7 +81,7 @@ func.func @{{ KERNEL_NAME }}{{kernel.def_kernel(inputs=[X, W, Bias], outputs=[Y]
         {% if Bias -%}
         {{ kernel.def_dma_op("MVIN", "Bias", Bias_idx, Y_tile_desc, subtile_size=[1, SUB_TILE_M, SUB_TILE_N], indent_size=8) }}
         {%- else -%}
-        affine.vector_store %v0, %Y_buffer[0, 0, 0] : {{ Y_tile_desc.get_mlir_shape(DATA_STYPE) }}, vector<{{ kernel.get_spad_size_per_lane(TILE_M, TILE_N) }}x{{DATA_STYPE}}>
+        {{ kernel.zero_init_store("Y_buffer", Y_tile_desc.get_mlir_shape(DATA_STYPE), kernel.get_spad_size_per_lane(TILE_M, TILE_N), DATA_STYPE, indent_size=8, chunk=32) }}
         {% endif %}
         affine.for %index3 = 0 to {{ K }} step {{ TILE_K }} {
           {{kernel.load_input(indent_size=10)}}
@@ -119,9 +113,6 @@ func.func @{{ KERNEL_NAME }}{{kernel.def_kernel(inputs=[X, W, Bias], outputs=[Y]
   {{ kernel.def_sram_buffer("X", X_tile_desc, indent_size=2) }}
   {{ kernel.def_sram_buffer("W", W_tile_desc, indent_size=2) }}
   {{ kernel.def_sram_buffer("Y", Y_tile_desc, indent_size=2) }}
-  {% if not Bias %}
-  %v0 = arith.constant dense<0.0> : vector<{{ kernel.get_spad_size_per_lane(TILE_M, TILE_N) }}x{{DATA_STYPE}}>
-  {% endif %}
   %c0 = arith.constant 0 : index
   {{ kernel.def_local_vars(indent_size=2) }}
   affine.for %index0=0 to {{ B }} {
@@ -134,7 +125,7 @@ func.func @{{ KERNEL_NAME }}{{kernel.def_kernel(inputs=[X, W, Bias], outputs=[Y]
         {% if Bias -%}
         {{ kernel.def_dma_op("MVIN", "Bias", Bias_idx, Y_tile_desc, subtile_size=[1, SUB_TILE_M, SUB_TILE_N], indent_size=8) }} // Why not N,M? Currently, dma-fine-grained pass assume M->N order...
         {%- else -%}
-        affine.vector_store %v0, %Y_buffer[0, 0, 0] : memref<1x{{ TILE_N }}x{{ TILE_M }}x{{DATA_STYPE}}, 1>, vector<{{ kernel.get_spad_size_per_lane(TILE_M, TILE_N) }}x{{DATA_STYPE}}>
+        {{ kernel.zero_init_store("Y_buffer", Y_tile_desc.get_mlir_shape(DATA_STYPE), kernel.get_spad_size_per_lane(TILE_M, TILE_N), DATA_STYPE, indent_size=8, chunk=32) }}
         {% endif %}
         affine.for %index3 = 0 to {{ K }} step {{ TILE_K }} {
           {{ kernel.def_dma_op("MVIN", "X", X_idx, X_tile_desc, subtile_size=[1, SUB_TILE_M, SUB_TILE_K], indent_size=10) }}
