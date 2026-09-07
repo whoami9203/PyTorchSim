@@ -1007,6 +1007,17 @@ class MLIRTemplateKernel(MLIRKernel, BaseMLIRHardwareInfo):
         size = tile_m * ((tile_n + self.vector_lane - 1) // self.vector_lane)
         return max(size, 2) # vector load/store
 
+    @staticmethod
+    def zero_literal(mlir_dtype: str) -> str:
+        """MLIR requires an integer literal (e.g. `0`) for integer vector/tensor element
+        types and a floating-point literal (e.g. `0.0`) for float element types -- passing
+        the wrong literal kind (e.g. `dense<0.0> : vector<32xi8>`) is rejected by mlir-opt
+        with "expected integer elements, but parsed floating-point". DTYPE_TO_MLIR's integer
+        values ("i1","i8","i16","i32","i64") all start with "i"; every float value ("f16","f32",
+        "f64","bf16") does not, so a leading-"i" check is sufficient to pick the right kind.
+        """
+        return "0" if mlir_dtype.startswith("i") else "0.0"
+
     def zero_init_store(self, buffer_var: str, tile_shape: str, flat_size, dtype, indent_size=0, chunk=None):
         """Zero-fills the first flat_size elements of buffer_var (reinterpreted as flat 1D) via chunked
         vector stores. tile_shape must be the buffer's actual declared type (e.g. from
@@ -1038,8 +1049,9 @@ class MLIRTemplateKernel(MLIRKernel, BaseMLIRHardwareInfo):
         lane = chunk if chunk is not None else self.vector_lane
         n_padded = ((flat_size + lane - 1) // lane) * lane
         zid = next(self.zero_init_counter)
+        zero_lit = self.zero_literal(dtype)
         lines = [
-            f"%t_zero{zid} = arith.constant dense<0.0> : vector<{lane}x{dtype}>",
+            f"%t_zero{zid} = arith.constant dense<{zero_lit}> : vector<{lane}x{dtype}>",
             f"%t_zflat{zid} = memref.reinterpret_cast %{buffer_var} to offset: [0], sizes: [{flat_size}], strides: [1] : {tile_shape} to memref<{flat_size}x{dtype}, 1>",
             f"affine.for %t_zi{zid} = 0 to {n_padded} step {lane} {{",
             f"  affine.vector_store %t_zero{zid}, %t_zflat{zid}[%t_zi{zid}] : memref<{flat_size}x{dtype}, 1>, vector<{lane}x{dtype}>",

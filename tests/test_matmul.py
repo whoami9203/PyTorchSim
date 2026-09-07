@@ -19,8 +19,8 @@ def test_matmul(device, input_size=128, hidden_size=128, output_size=128):
     def custom_matmul(a, b):
         return torch.matmul(a, b)
     torch.manual_seed(0)
-    input = torch.randn(input_size, hidden_size, dtype=torch.float16)
-    weight = torch.randn(hidden_size, output_size, dtype=torch.float16)
+    input = torch.randint(-8, 8, (input_size, hidden_size), dtype=torch.int8)
+    weight = torch.randint(-8, 8, (hidden_size, output_size), dtype=torch.int8)
     x1 = input.to(device=device)
     w1 = weight.to(device=device)
     x2 = input.to("cpu")
