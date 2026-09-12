@@ -12,6 +12,8 @@
 #include <memory>
 #include <vector>
 
+#include "ZeroComputeMode.h"
+
 enum class Opcode { MOVIN, MOVOUT, COMP, BAR, COUNT};
 
 typedef uint64_t addr_type;
@@ -54,8 +56,13 @@ class Instruction : public std::enable_shared_from_this<Instruction> {
   std::vector<size_t>& get_tile_size() { return tile_size; }
   std::vector<int>& get_tile_stride() { return tile_stride; }
   void set_overlapping_cycle(cycle_type cycle) { overlapping_cycle = cycle; }
-  cycle_type get_overlapping_cycle() { return overlapping_cycle; }
-  cycle_type get_compute_cycle() { return compute_cycle; }
+  // Both report 0 under TOGSIM_ZERO_COMPUTE=1 -- see ZeroComputeMode.h. The
+  // stored values are left alone so a trace still shows what the compute would
+  // have cost.
+  cycle_type get_overlapping_cycle() {
+    return ZeroComputeMode::enabled() ? 0 : overlapping_cycle;
+  }
+  cycle_type get_compute_cycle() { return ZeroComputeMode::enabled() ? 0 : compute_cycle; }
   void set_compute_cycle(cycle_type cycle) { compute_cycle = cycle; }
   void set_indirect_index_path(std::string indirect_path) { _is_indirect_mode=true; _indirect_index_path=indirect_path; }
   void print();

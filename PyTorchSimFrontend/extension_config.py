@@ -186,6 +186,19 @@ def __getattr__(name):
             os.path.join(legosim_root, "PyTorchSim/configs/legosim/simplessd.yml"),
         )
 
+    # How many NAND flash chiplets LegoSim spawns for the "simplessd" backend:
+    # one per flash channel, each running SimpleSSD's PAL layer for that
+    # channel alone (see SimpleSSD-Standalone/sim/legosim_flash_chiplet_main.cc
+    # and TOGSim/include/SsdLegoSimLink.h). This must match the [pal] Channel
+    # of the SimpleSSD device config the chiplets are given, or the modeled
+    # device is not the configured one -- both the chiplets and SsdLegoSimLink
+    # warn at runtime when they disagree. Left unset, it is read straight out
+    # of that config (via the simplessd_config key in CONFIG_LEGOSIM_SSD_YAML),
+    # which is the arrangement to prefer: one source of truth.
+    if name == "CONFIG_LEGOSIM_SSD_NUM_CHANNELS":
+        value = os.environ.get("TOGSIM_LEGOSIM_SSD_NUM_CHANNELS")
+        return int(value) if value else None
+
     # LegoSim live DRAM+interconnect latency integration (see
     # TOGSim/include/DramLegoSimLink.h). Unlike the SSD path above (weight
     # reads only), this is a catch-all covering every DMA access -- reads
@@ -193,8 +206,9 @@ def __getattr__(name):
     # models for the run when enabled. Like the SSD path, a real phase-2
     # NoC simlet (popnet) always runs whenever this is enabled -- no
     # separate opt-in toggle -- exercising interchiplet's real two-phase
-    # fixed-point loop (see TOGSim/legosim/topology/dram_noc_3.gv) rather
-    # than the default one-shot (-t 1) path. dram_simlet/DramLegoSimLink
+    # fixed-point loop against a topology generated for this run's chiplets
+    # (see Simulator/simulator.py's _write_noc_topology) rather than the
+    # default one-shot (-t 1) path. dram_simlet/DramLegoSimLink
     # track a running timeNow (like artifact/HBM_DDR/DDR.cpp) specifically
     # so this NoC delay has somewhere to land.
     if name == "CONFIG_TOGSIM_LEGOSIM_DRAM":

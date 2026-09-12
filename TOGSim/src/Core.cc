@@ -295,10 +295,22 @@ void Core::cycle() {
             }
 
             if (inst->get_compute_cycle() == 0) {
+              // Costs nothing, so retire it here instead of putting it through
+              // a pipeline that would drain it on the very next cycle anyway --
+              // and without claiming the cycle's issue slot (`issued` stays
+              // false), so a whole run of them retires at once. Reached by the
+              // sparse path (the BAR case below zeroes its children's compute
+              // cycle) and by every COMP under TOGSIM_ZERO_COMPUTE=1.
+              //
+              // erase() returns the next iterator, and taking it is what keeps
+              // the loop alive: `it` is gone afterwards, so neither the trailing
+              // `it++` below nor `inst` (a reference into the erased node) may
+              // be touched -- hence the continue.
+              _stat_tot_skipped_inst.at(static_cast<size_t>(inst->get_opcode()))++;
               inst->finish_instruction();
               static_cast<Tile*>(inst->get_owner())->inc_finished_inst();
-              _stat_tot_skipped_inst.at(static_cast<size_t>(inst->get_opcode()))++;
-              instructions.erase(it);
+              it = instructions.erase(it);
+              continue;
             } else {
               core_trace_log::trace_instruction_line(_core_cycle,
                                                        _id,

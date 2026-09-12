@@ -289,12 +289,28 @@ if __name__ == "__main__":
                               "Only takes effect with --ssd-backend simplessd (or "
                               "TOGSIM_LEGOSIM_SSD_BACKEND=simplessd). Sets the "
                               "TOGSIM_LEGOSIM_SSD_YAML env var; leave unset to use the default.")
+    parser.add_argument("--ssd-channels", type=int, default=None,
+                         help="How many NAND flash chiplets to run, one per flash channel (see "
+                              "TOGSim/include/SsdLegoSimLink.h). Only applies to --ssd-backend "
+                              "simplessd. Leave unset to take the count from [pal] Channel in the "
+                              "SimpleSSD device config named by the --ssd-yaml entry, which is the "
+                              "arrangement to prefer -- overriding it here models a device whose "
+                              "config says otherwise. Sets TOGSIM_LEGOSIM_SSD_NUM_CHANNELS.")
+    parser.add_argument("--zero-compute", action="store_true",
+                         help="Charge zero cycles for every NPU compute instruction, leaving only "
+                              "data movement (see TOGSim/include/ZeroComputeMode.h). Use it to get "
+                              "the lower bound the memory system alone imposes -- how much of the "
+                              "runtime is flash, not the systolic array. Sets TOGSIM_ZERO_COMPUTE.")
     args = parser.parse_args()
 
     if args.ssd_backend:
         os.environ["TOGSIM_LEGOSIM_SSD_BACKEND"] = args.ssd_backend
     if args.ssd_yaml:
         os.environ["TOGSIM_LEGOSIM_SSD_YAML"] = args.ssd_yaml
+    if args.ssd_channels:
+        os.environ["TOGSIM_LEGOSIM_SSD_NUM_CHANNELS"] = str(args.ssd_channels)
+    if args.zero_compute:
+        os.environ["TOGSIM_ZERO_COMPUTE"] = "1"
 
     sys.path.append(os.environ.get("PYTORCHSIM_ROOT_PATH", "/workspace/PyTorchSim"))
 

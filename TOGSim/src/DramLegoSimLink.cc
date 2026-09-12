@@ -66,6 +66,7 @@ uint64_t DramLegoSimLink::query_latency_ns(uint64_t addr, uint64_t nbytes, uint6
   req.nbytes = nbytes;
   req.inst_id = inst_id;
   req.set_addr_name(addr_name);
+  req.kind = kSsdReqRead;
   req.terminate = 0;
   RoundTrip result = round_trip(req, static_cast<InterChiplet::TimeType>(core_cycle));
 
@@ -89,6 +90,7 @@ void DramLegoSimLink::shutdown() {
   if (!_enabled || _shutdown_sent) return;
   _shutdown_sent = true;
   SsdLatencyRequest req{};
+  req.kind = kSsdReqTerminate;
   req.terminate = 1;
   round_trip(req, 0);
   spdlog::info("[DramLegoSimLink] sent terminate sentinel, DRAM simlet acked.");

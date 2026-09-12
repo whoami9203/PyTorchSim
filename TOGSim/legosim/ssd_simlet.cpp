@@ -92,7 +92,20 @@ int main(int argc, char** argv) {
         InterChiplet::readSync(timeNow, peer_x, peer_y, self_x, self_y, sizeof(req), 0);
 
     SsdLatencyResponse resp{};
-    if (!req.terminate) {
+    if (req.kind == kSsdReqGeometry) {
+      // Answer SsdLegoSimLink's startup handshake so the "formula" backend
+      // stays a drop-in stand-in for the real flash chiplets. There is no
+      // NAND geometry here, so report the page size as the stripe and an
+      // unbounded capacity: with a single simlet (this backend is not
+      // per-channel) the stripe size only decides how a DMA is chopped up
+      // before being handed to the one process, and compute_latency_ns() is
+      // linear in bytes, so the answer is the same either way.
+      resp.stripe_bytes = kPageSizeBytes;
+      resp.capacity_bytes = 0;
+      resp.num_channels = 1;
+      resp.channel_id = 0;
+      timeNow = time_end;
+    } else if (req.kind != kSsdReqTerminate) {
       resp.latency_ns = compute_latency_ns(req.addr, req.nbytes, bandwidth_gbps, base_latency_ns);
       std::cout << "[ssd_simlet] addr=0x" << std::hex << req.addr << std::dec
                 << " nbytes=" << req.nbytes << " inst_id=" << req.inst_id
@@ -123,7 +136,7 @@ int main(int argc, char** argv) {
     pipe_comm.write_data(resp_file.c_str(), &resp, sizeof(resp));
     InterChiplet::writeSync(timeNow, self_x, self_y, peer_x, peer_y, sizeof(resp), 0);
 
-    if (req.terminate) {
+    if (req.kind == kSsdReqTerminate) {
       std::cout << "[ssd_simlet] received terminate sentinel, exiting." << std::endl;
       break;
     }
