@@ -1,6 +1,6 @@
 num_cores: 1
-core_freq_mhz: 700
-core_stats_print_period_cycles: 10000
+core_freq_mhz: 1000
+core_stats_print_period_cycles: 100000
 
 vpu_num_lanes: 32
 vpu_spad_size_kb_per_lane: 256
@@ -9,13 +9,13 @@ vpu_vector_length_bits: 128
 dram_type: ramulator2
 
 dram_channels: 4
-dram_stats_print_period_cycles: 10000
-ramulator_config_path: ../configs/ramulator2_configs/LPDDR5X.yaml
+dram_stats_print_period_cycles: 100000
+ramulator_config_path: ../configs/ramulator2_configs/LPDDR5X_9600.yaml
 
 icnt_type: booksim2
-icnt_freq_mhz: 700
-icnt_injection_ports_per_core: 4
-booksim_config_path: ../configs/booksim2_configs/fly_c1_m4_p4.icnt
+icnt_freq_mhz: 1000
+icnt_injection_ports_per_core: 8
+booksim_config_path: ../configs/booksim2_configs/fly_c8_m4.icnt
 
 pytorchsim_functional_mode: 0
 pytorchsim_timing_mode: 1

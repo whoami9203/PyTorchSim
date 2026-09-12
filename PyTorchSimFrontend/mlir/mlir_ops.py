@@ -191,7 +191,12 @@ class ExtensionOverrides(common.OpOverrides):
 
         # Case A: Integer -> Float
         if not src_is_float and dst_is_float:
-            op_str = f"arith.uitofp %{operand} : {src_shape} to {shape}"
+            # i1 (bool) has no sign bit -- uitofp gives the correct 0.0/1.0.
+            # Every other integer source (i8/i16/i32/...) is signed in this
+            # codebase (see the matching extsi/extui choice in Case C below),
+            # so use sitofp to preserve negative values correctly.
+            convert_op = "arith.uitofp" if src_mlir_dtype == "i1" else "arith.sitofp"
+            op_str = f"{convert_op} %{operand} : {src_shape} to {shape}"
         # Case B: Float -> Integer
         elif src_is_float and not dst_is_float:
             op_str = f"arith.fptosi %{operand} : {src_shape} to {shape}"

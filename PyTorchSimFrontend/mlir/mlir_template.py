@@ -547,8 +547,17 @@ class MLIRTemplateKernel(MLIRKernel, BaseMLIRHardwareInfo):
                         template_buf = self.kernel_group.args.input_buffers[prologue_output_arg]
                         target_buf = f"{template_buf}_buffer" # FIXME. How to pass spad buffer name?
 
-                        # To skip the dma code gen
-                        kernel.buffer_names[prologue_input_arg] = target_buf
+                        # To skip the dma code gen. This aliases the raw input name to the
+                        # same buffer as the (already DMA'd) template buffer, which is only
+                        # correct when the prologue preserves the element type -- e.g. a
+                        # scale multiply can legitimately read and write the same SPAD
+                        # buffer. For a dtype-widening cast (e.g. int8->int32), the pre-cast
+                        # read must stay in its own, narrower-typed buffer, so leave
+                        # prologue_input_arg out of buffer_names here and let load_epilogue's
+                        # normal allocate-on-first-use path (mlir_template.py's load_epilogue)
+                        # provision a dedicated buffer and issue its own correctly-typed DMA.
+                        if V.graph.get_dtype(prologue_input_arg) == V.graph.get_dtype(prologue_output_arg):
+                            kernel.buffer_names[prologue_input_arg] = target_buf
                         kernel.buffer_names[prologue_output_arg] = target_buf
 
                         # Edge delete
@@ -826,18 +835,26 @@ class MLIRTemplateKernel(MLIRKernel, BaseMLIRHardwareInfo):
             code = IndentedBuffer()
             prologue_code = self.codegen_prologue_body()
             if prologue_code.getvalue():
-                input_dma_code = self.def_dma_op("MVIN", self.prologue_info["input_dram_var"], self.prologue_info["input_idx"],
-                                self.prologue_info["input_tile_desc"], subtile_size=self.prologue_info["input_subtile_size"], async_type=False, lazy_mode=False)
-                weight_dma_code = self.def_dma_op("MVIN", self.prologue_info["weight_dram_var"], self.prologue_info["weight_idx"],
-                                self.prologue_info["weight_tile_desc"], subtile_size=self.prologue_info["weight_subtile_size"], async_type=False, lazy_mode=False)
+                # The fused operand's own DMA is already generated internally by
+                # codegen_prologue_body() (via its ops.load() call, which resolves
+                # the buffer's real DRAM dtype correctly on its own). Also issuing
+                # the "official", kernel-level DMA here for that same operand --
+                # always at the kernel's logical/post-fusion dtype -- produces a
+                # second, differently-typed memref.dma_start against the same SPAD
+                # buffer (harmless when the prologue is dtype-preserving, since both
+                # declarations then agree; a real type conflict once the prologue
+                # changes dtype, e.g. an int8->int32 widening cast). Only the other,
+                # non-fused operand still needs its DMA issued explicitly here.
                 if (self.prologue_info["is_input_fused"]):
-                    code.splice(input_dma_code)
                     code.splice(prologue_code)
+                    weight_dma_code = self.def_dma_op("MVIN", self.prologue_info["weight_dram_var"], self.prologue_info["weight_idx"],
+                                    self.prologue_info["weight_tile_desc"], subtile_size=self.prologue_info["weight_subtile_size"], async_type=False, lazy_mode=False)
                     code.splice(weight_dma_code)
                 else:
-                    code.splice(weight_dma_code)
-                    code.splice(prologue_code)
+                    input_dma_code = self.def_dma_op("MVIN", self.prologue_info["input_dram_var"], self.prologue_info["input_idx"],
+                                    self.prologue_info["input_tile_desc"], subtile_size=self.prologue_info["input_subtile_size"], async_type=False, lazy_mode=False)
                     code.splice(input_dma_code)
+                    code.splice(prologue_code)
             else:
                 dma_code = self.def_dma_op("MVIN", self.prologue_info["input_dram_var"], self.prologue_info["input_idx"],
                                 self.prologue_info["input_tile_desc"], subtile_size=self.prologue_info["input_subtile_size"], async_type=False, lazy_mode=False)

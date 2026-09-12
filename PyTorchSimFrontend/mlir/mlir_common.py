@@ -106,6 +106,16 @@ DTYPE_LOWP_FP = [
     torch.float16,
 ]
 
+# Narrow integer dtypes that can appear as the source of a widening cast
+# (e.g. int8 -> int32 for a SmoothQuant-style W8A8 matmul prologue). Subject
+# to the same RVV LMUL constraint as DTYPE_LOWP_FP, so get_safe_vec_size()
+# treats them the same way.
+DTYPE_NARROW_INT = [
+    torch.int8,
+    torch.uint8,
+    torch.bool,
+]
+
 MLIR_INF = {
     "inf" : {
         "f16" : 0x7C00,
@@ -1091,7 +1101,7 @@ class BaseMLIRKernel(common.Kernel, BaseMLIRHardwareInfo):
     def get_safe_vec_size(self, default_vec_size: int = 64) -> int:
         """
         Cap forced vector size for low-precision paths so widening ops
-        (e.g., f16/bf16 -> f32) do not exceed RVV LMUL limits.
+        (e.g., f16/bf16 -> f32, or int8 -> int32) do not exceed RVV LMUL limits.
 
         Widening is legal up to source LMUL<=4 (destination LMUL<=8).
         Using RVV relation LMUL = (SEW * VL) / VLEN, the safe source VL is:
@@ -1104,7 +1114,7 @@ class BaseMLIRKernel(common.Kernel, BaseMLIRHardwareInfo):
         lowp_bits = []
         for info in self.buffer_types.values():
             dtype = info[0] if info else None
-            if dtype in DTYPE_LOWP_FP:
+            if dtype in DTYPE_LOWP_FP or dtype in DTYPE_NARROW_INT:
                 mlir_dtype = DTYPE_TO_MLIR[dtype]
                 lowp_bits.append(MLIR_TO_BIT[mlir_dtype])
 

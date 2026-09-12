@@ -1455,16 +1455,30 @@ class MLIRKernel(mlir_common.BaseMLIRKernel):
         if dram_name not in self.global_vars_dict:
             self.global_vars_dict[dram_name] = dict()
 
-        if str(raw_index) not in self.global_vars_dict[dram_name]:
-            new_name = f"buf{self.spadbuf_counter}_spad" if forced_name is None else f"{forced_name}_spad"
+        # Cache key includes mlir_dtype: a prologue that changes dtype (e.g. an
+        # int8->int32 widening cast) needs a genuinely separate SPAD buffer for
+        # the same dram_name/index, not a reused buffer declared at the other
+        # dtype -- that produces a real MLIR type conflict, not just a missed
+        # optimization.
+        cache_key = f"{raw_index}_{mlir_dtype}"
+        if cache_key not in self.global_vars_dict[dram_name]:
+            if forced_name is None:
+                new_name = f"buf{self.spadbuf_counter}_spad"
+            elif len(self.global_vars_dict[dram_name]) == 0:
+                new_name = f"{forced_name}_spad"
+            else:
+                # forced_name already used at a different dtype for this dram_name --
+                # disambiguate so we don't emit two conflicting memref.global symbols
+                # with the same name.
+                new_name = f"{forced_name}_{mlir_dtype}_spad"
             self.spadbuf_counter+=1
             # Add definition to header
             self.header.writeline(f"{c_type} {new_name}[{tile_size // self.vector_lane}] __attribute__ ((section(\".spad\")));")
             self.gem5_header.writeline(f"{c_type} {new_name}[{tile_size}] __attribute__((aligned(64)));")
             self.global_vars.writeline(f"memref.global @{new_name} : {tile_shape}")
-            self.global_vars_dict[dram_name][str(raw_index)] = new_name
+            self.global_vars_dict[dram_name][cache_key] = new_name
         else:
-            new_name = self.global_vars_dict[dram_name][str(raw_index)]
+            new_name = self.global_vars_dict[dram_name][cache_key]
         return new_name
 
     def get_scratchpad_buffer(self, dtype, dram_name, tile_desc, raw_index, buffer=None):

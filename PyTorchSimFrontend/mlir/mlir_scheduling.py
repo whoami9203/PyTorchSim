@@ -43,7 +43,7 @@ class MLIRScheduling(BaseScheduling):
         base_template_node2 = [node for node in node2.get_nodes() if node.is_template()]
 
         # Case 3: Prologue(Pointwise) + Tempalte
-        if len(base_template_node1) == 0 and len(node1.get_nodes())==1 and len(node2.get_nodes())==1 and not node1.is_reduction() and len(base_template_node2) == 1 and extension_config.CONFIG_FUSION_PROLOGUE:
+        if len(base_template_node1) == 0 and len(node1.get_nodes())==1 and not node1.is_reduction() and len(base_template_node2) == 1 and extension_config.CONFIG_FUSION_PROLOGUE:
             target_node = base_template_node2[0].node
 
             # Check if template supports prologue fusion
@@ -54,6 +54,40 @@ class MLIRScheduling(BaseScheduling):
                 return False
             if node1.node not in target_node.inputs or any(["view" in str(ori) for ori in node1.node.origins]): #FIXME
                 return False
+
+            # The GEMM template's prologue codegen (mlir_template.py /
+            # mlir_gemm_template.py) only supports a single dtype-changing op
+            # as the fused prologue (e.g. a plain widening cast) -- it does
+            # NOT support an arbitrary elementwise chain (e.g. a full
+            # quantize: div -> round -> clamp -> cast -> cast). Inductor
+            # collapses adjacent pointwise ops into one scheduler node before
+            # this check runs, so len(node1.get_nodes())==1 alone can't tell
+            # "one op" from "several ops fused into one node" -- origins
+            # can. Reject anything more complex than a single source op to
+            # avoid generating broken prologue codegen for it.
+            if len(node1.node.origins) > 1:
+                return False
+
+            # node2 may already contain a fused EPILOGUE (a node that reads
+            # the template's own output) -- that's fine, prologue and
+            # epilogue fusion are independent and codegen_template_code
+            # (mlir_template.py) handles prologue_nodes/epilogue_nodes as
+            # separate lists. But node2 must NOT already contain a fused
+            # PROLOGUE (a node that writes one of the template's own declared
+            # inputs): the GEMM template's render() only tracks a single
+            # fused-input operand (a lone is_input_fused flag), so accepting
+            # a second simultaneous prologue here produces broken codegen --
+            # the operand render() doesn't know is also fused gets emitted
+            # with the wrong (post-cast) DMA dtype.
+            if len(node2.get_nodes()) > 1:
+                target_input_names = {
+                    i.get_name() for i in target_node.inputs if hasattr(i, "get_name")
+                }
+                for extra in node2.get_nodes():
+                    if extra is base_template_node2[0]:
+                        continue
+                    if any(w.name in target_input_names for w in extra.read_writes.writes):
+                        return False
 
             # We don't fuse this edge case...
             if base_template_node2[0].group[1][0][0] == 1:
