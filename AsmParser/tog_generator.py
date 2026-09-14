@@ -192,7 +192,18 @@ class tog_generator:
     def parse_graph(self):
         # Create nodes
         prev_node = []
-        self.new_node_id = len(self.raw_graph.values()) + 1
+        # Must exceed the *highest* raw node id, not just the raw node *count*.
+        # The raw graph's ids can have gaps (e.g. pruned/degenerate nodes), so
+        # len(values())+1 can land back inside the real id range and collide
+        # with an actual node id -- silently corrupting node_dict's insertion
+        # order for whichever real node that id belongs to (dict[] reassignment
+        # keeps the *original* insertion position, so the real node ends up
+        # serialized far too early relative to its true dependencies).
+        # Confirmed via a kernel with 4 pruned ids (12/25/34/42) and 19 loop
+        # nodes: len()+1 (45) collided with real ids 45/46/47, silently
+        # mispositioning the store node and crashing TileGraphParser with a
+        # null-parent dereference at simulation load time.
+        self.new_node_id = max(self.raw_graph.keys()) + 1
         for value in self.raw_graph.values():
             new_node = self.create_node(value, prev_node)
             if not prev_node or prev_node[-1].parent == new_node.parent:

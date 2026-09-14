@@ -892,6 +892,15 @@ void TileGraphParser::register_tile(std::shared_ptr<TileNode> tile_node) {
   /* Link parent tile */
   for (std::string input_name : tile_node->get_parent_name()) {
     std::shared_ptr<TileNode> parent = _output_map[input_name];
+    if (parent == nullptr) {
+      // _output_map[input_name] default-constructs a null entry on a missed
+      // lookup rather than throwing -- fail loudly here instead of silently
+      // dereferencing null below. In practice this means the onnx graph
+      // references an output name no earlier node produced (e.g. the
+      // tog_generator.py node-id-collision bug fixed alongside this).
+      throw std::runtime_error("TileGraphParser::register_tile: parent output '" +
+                                input_name + "' not found in _output_map");
+    }
     if (parent->get_type() == TileType::LOOP_END_NODE) {
       parent->get_owner_loop()->add_child(tile_node);
       tile_node->add_parent(parent->get_owner_loop());

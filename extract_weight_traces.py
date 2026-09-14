@@ -91,8 +91,13 @@ def main():
         description="Extract SSD trace rows whose addresses fall within merged weight ranges."
     )
     parser.add_argument(
-        "--dir",
+        "--trace_name",
         default=None,
+        help="trace name",
+    )
+    parser.add_argument(
+        "--dir",
+        default="/workspace/legomerged/eclab_legosim/PyTorchSim/ssd_traces",
         help="Directory containing model_weight_ranges_merged.txt and SSD trace CSV files",
     )
     parser.add_argument(
@@ -102,12 +107,8 @@ def main():
     )
     args = parser.parse_args()
 
-    if args.dir is None:
-        trace_dir = os.environ.get("TOGSIM_SSD_TRACE_DIR")
-        trace_name = os.environ.get("TOGSIM_SSD_TRACE_NAME")
-        if not trace_dir or not trace_name:
-            raise RuntimeError("TOGSIM_SSD_TRACE_DIR and TOGSIM_SSD_TRACE_NAME must be set")
-        base_dir = os.path.join(trace_dir, trace_name)
+
+    base_dir = os.path.join(args.dir, args.trace_name)
     base_dir = os.path.abspath(base_dir)
 
     if args.ranges is None:
