@@ -147,10 +147,19 @@ class SimStaticCache(StaticCache):
 
 
 @torch.no_grad()
-def _forward_streamed(model, loader, input_ids, attention_mask, past_key_values, device, dtype):
+def _forward_streamed(model, loader, input_ids, attention_mask, past_key_values, device, dtype,
+                       include_epilogue=True):
     """Equivalent to LlamaForCausalLM.forward(), except each decoder layer's weights are
     loaded from disk right before it runs and discarded right after, so only one layer's
-    worth of weights is resident at a time."""
+    worth of weights is resident at a time.
+
+    include_epilogue=False skips the final norm + lm_head projection to vocab logits and
+    returns the raw decoder-layer output instead: for a decode/prefill-only timing run
+    scoped to --num_layers decoder layers, the epilogue is a separate, unrelated norm +
+    large matmul against the full vocab that has nothing to do with what's being measured
+    (see conversation: it's also what LlamaModel.norm is -- a single instance distinct from
+    every decoder layer's own input_layernorm/post_attention_layernorm). run_compare() still
+    needs real logits to diff against the CPU reference, so it always passes True."""
     base_model = model.model
     inputs_embeds = base_model.embed_tokens(input_ids)
 
@@ -190,6 +199,9 @@ def _forward_streamed(model, loader, input_ids, attention_mask, past_key_values,
             position_embeddings=position_embeddings,
         )
         loader.unload_module_(decoder_layer)
+
+    if not include_epilogue:
+        return hidden_states
 
     hidden_states = base_model.norm(hidden_states)
     logits = model.lm_head(hidden_states).float()
@@ -289,10 +301,16 @@ def _dump_module_weight_ranges(module, name_prefix):
 
 
 @torch.no_grad()
-def _forward_streamed_npu(model, loader, prelude_fn, epilogue_fn, input_ids, attention_mask, past_key_values, device, dtype):
+def _forward_streamed_npu(model, loader, prelude_fn, epilogue_fn, input_ids, attention_mask, past_key_values, device, dtype,
+                           include_epilogue=True):
     """Same as _forward_streamed, but the embed/mask/rope prelude and the norm/lm_head epilogue
     are each run through a caller-supplied (compiled) callable instead of plain eager ops, so only
-    the necessary glue between layers (the weight load/unload calls) still runs eagerly."""
+    the necessary glue between layers (the weight load/unload calls) still runs eagerly.
+
+    include_epilogue=False skips calling epilogue_fn entirely (see _forward_streamed's docstring
+    for why) and returns the raw decoder-layer output instead -- since torch.compile is lazy,
+    never calling it also means the epilogue kernel is never traced/compiled/dispatched to the
+    NPU simulator at all, not just that its result is discarded."""
     base_model = model.model
     past_seen_tokens = int(past_key_values.get_seq_length())
     cache_position = torch.arange(
@@ -324,6 +342,9 @@ def _forward_streamed_npu(model, loader, prelude_fn, epilogue_fn, input_ids, att
             position_embeddings=position_embeddings,
         )
         loader.unload_module_(decoder_layer)
+
+    if not include_epilogue:
+        return hidden_states
 
     return epilogue_fn(base_model, model.lm_head, hidden_states)
 
