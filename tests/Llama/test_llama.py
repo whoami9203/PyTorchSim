@@ -34,7 +34,7 @@ def test_result(name, out, ref, rtol=1e-4, atol=1e-4):
 def run_rmsnorm_test(
     device,
     batch=1,
-    seq_len=32,
+    seq_len=500,
     dtype="float32",
     rtol=1e-3,
     atol=1e-3,
@@ -408,16 +408,16 @@ if __name__ == "__main__":
     device = torch.device("npu:0")
     #test_triu(device, size=(32, 128), diagonal=1)
     torch.compiler.is_compiling = lambda: True # FIXME. How to fix this?
-    # run_rmsnorm_test(device, dtype=args.dtype)
+    run_rmsnorm_test(device, dtype=args.dtype)
     # run_rotary_embedding_test(device, dtype=args.dtype)
-    run_decoder_layer_test(
-        device=device,
-        batch=args.batch,
-        seq_len=args.seq_len,
-        dtype=args.dtype,
-        rtol=args.rtol,
-        atol=args.atol,
-    )
+    # run_decoder_layer_test(
+    #     device=device,
+    #     batch=args.batch,
+    #     seq_len=args.seq_len,
+    #     dtype=args.dtype,
+    #     rtol=args.rtol,
+    #     atol=args.atol,
+    # )
     # run_llama_model_test(device)
     #run_custom_llama_test(
     #    device=device,

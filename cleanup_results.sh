@@ -14,7 +14,6 @@ rm -rf ${TORCHSIM_DIR}/togsim_results/${TRACE_NAME}/*
 if [[ "${REMOVE_OUTPUTS}" == "1" ]]; then
 	rm -rf ${TORCHSIM_DIR}/outputs/*
 fi
-rm -rf ${TORCHSIM_DIR}/ssd_traces/${TRACE_NAME}/*.csv
-rm -rf ${TORCHSIM_DIR}/ssd_traces/${TRACE_NAME}/*.txt
+rm -rf ${TORCHSIM_DIR}/ssd_traces/${TRACE_NAME}/*
 rm -rf ${TORCHSIM_DIR}/validation/${TRACE_NAME}/gemm_candidates/*.txt
 shopt -u dotglob
