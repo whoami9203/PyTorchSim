@@ -223,11 +223,21 @@ def _epilogue(base_model, embed_out, hidden_states):
 
 
 @torch.no_grad()
-def _forward_streamed_npu(model, loader, prelude_fn, epilogue_fn, input_ids, attention_mask, past_key_values, device, dtype):
+def _forward_streamed_npu(model, loader, prelude_fn, epilogue_fn, input_ids, attention_mask, past_key_values, device, dtype,
+                           include_epilogue=True):
     """Same layer-streamed weight loading as _forward_streamed, but the embed/mask/rope prelude and
     the norm/embed_out epilogue each run through a caller-supplied (compiled) callable, so only the
     weight load/unload glue between layers still runs eagerly. `past_key_values` is a single shared
-    `StaticCache` reused across every layer, same as tests/Llama/test_tinyllama.py."""
+    `StaticCache` reused across every layer, same as tests/Llama/test_tinyllama.py.
+
+    include_epilogue=False skips calling epilogue_fn entirely and returns the raw decoder-layer
+    output instead: for a decode/prefill-only timing run scoped to a truncated number of decoder
+    layers, the epilogue (final_layer_norm + embed_out) is a separate, unrelated norm and a large
+    matmul against the full vocab that has nothing to do with what's being measured -- same
+    reasoning as tests/Llama/test_llama2_7B.py's _forward_streamed_npu. Since torch.compile is
+    lazy, never calling epilogue_fn also means that kernel is never traced/compiled/dispatched to
+    the NPU simulator at all. generate_streamed_npu (real multi-token generation, which needs real
+    logits to sample from every step) always uses the default True."""
     base_model = model.gpt_neox
     past_seen_tokens = int(past_key_values.get_seq_length())
     cache_position = torch.arange(
@@ -255,11 +265,15 @@ def _forward_streamed_npu(model, loader, prelude_fn, epilogue_fn, input_ids, att
         hidden_states = layer_outputs[0]
         loader.unload_module_(layer)
 
+    if not include_epilogue:
+        return hidden_states
+
     return epilogue_fn(base_model, model.embed_out, hidden_states)
 
 
 @torch.no_grad()
-def _forward_streamed(model, loader, input_ids, attention_mask, past_key_values, device, dtype):
+def _forward_streamed(model, loader, input_ids, attention_mask, past_key_values, device, dtype,
+                       include_epilogue=True):
     """Equivalent to GPTNeoXForCausalLM.forward(), except each decoder layer's weights are loaded
     from disk right before it runs and discarded right after, so only one layer's worth of weights
     (~450MB for GPT-NeoX-20B) is resident at a time instead of the full ~40GB model.
@@ -271,6 +285,9 @@ def _forward_streamed(model, loader, input_ids, attention_mask, past_key_values,
     patch onto no longer exist in transformers>=4.54 (folded into `GPTNeoXAttention.forward`
     directly, mirroring Llama's own Cache-API migration), so this now goes through the model's
     native cache handling instead.
+
+    include_epilogue=False skips final_layer_norm + embed_out and returns the raw decoder-layer
+    output instead -- see _forward_streamed_npu's docstring for why.
     """
     base_model = model.gpt_neox
     inputs_embeds = base_model.embed_in(input_ids)
@@ -308,6 +325,9 @@ def _forward_streamed(model, loader, input_ids, attention_mask, past_key_values,
         )
         hidden_states = layer_outputs[0]
         loader.unload_module_(layer)
+
+    if not include_epilogue:
+        return hidden_states
 
     hidden_states = base_model.final_layer_norm(hidden_states)
     logits = model.embed_out(hidden_states).float()

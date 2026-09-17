@@ -75,9 +75,10 @@ def _compile_for_npu(model, config):
 
 
 def _run_forward(model, loader, input_ids, attention_mask, past_key_values, device, torch_dtype, config, npu,
-                  use_togsimulator=False):
+                  use_togsimulator=False, include_epilogue=True):
     if not npu:
-        return _forward_streamed(model, loader, input_ids, attention_mask, past_key_values, device, torch_dtype)
+        return _forward_streamed(model, loader, input_ids, attention_mask, past_key_values, device, torch_dtype,
+                                  include_epilogue=include_epilogue)
     compiled_prelude, compiled_epilogue = _compile_for_npu(model, config)
     if not use_togsimulator:
         # Every kernel dispatches through TOGSimulator.run_standalone() (a
@@ -88,6 +89,7 @@ def _run_forward(model, loader, input_ids, attention_mask, past_key_values, devi
         return _forward_streamed_npu(
             model, loader, compiled_prelude, compiled_epilogue,
             input_ids, attention_mask, past_key_values, device, torch_dtype,
+            include_epilogue=include_epilogue,
         )
     # Wrap the actual forward call (not the torch.compile() calls above, which
     # are lazy and don't dispatch anything by themselves) in a TOGSimulator
@@ -105,6 +107,7 @@ def _run_forward(model, loader, input_ids, attention_mask, past_key_values, devi
         return _forward_streamed_npu(
             model, loader, compiled_prelude, compiled_epilogue,
             input_ids, attention_mask, past_key_values, device, torch_dtype,
+            include_epilogue=include_epilogue,
         )
 
 
@@ -132,29 +135,33 @@ def _build_phase_inputs(phase, config, batch, length, seed, torch_dtype, device)
 
 
 @torch.no_grad()
-def run_prefill(model_id, seq_len, batch, dtype, num_layers, device, npu, seed, use_togsimulator=False):
+def run_prefill(model_id, seq_len, batch, dtype, num_layers, device, npu, seed, use_togsimulator=False,
+                include_epilogue=False):
     label = "NPU" if npu else "CPU"
     print(f"\n[Running GPT-NeoX-20B PREFILL-only phase, {label}, seq_len={seq_len}, batch={batch}]")
     model, config, torch_dtype, loader = _build_model_and_loader(model_id, dtype, device, num_layers)
     input_ids, attention_mask, past_key_values = _build_phase_inputs(
         "prefill", config, batch, seq_len, seed, torch_dtype, device
     )
-    logits = _run_forward(model, loader, input_ids, attention_mask, past_key_values, device, torch_dtype, config, npu,
-                           use_togsimulator)
-    print(f"[Prefill] done. logits shape={tuple(logits.shape)}")
+    output = _run_forward(model, loader, input_ids, attention_mask, past_key_values, device, torch_dtype, config, npu,
+                           use_togsimulator, include_epilogue=include_epilogue)
+    kind = "logits" if include_epilogue else "hidden_states (--epilogue not set)"
+    print(f"[Prefill] done. {kind} shape={tuple(output.shape)}")
 
 
 @torch.no_grad()
-def run_decode(model_id, context_len, batch, dtype, num_layers, device, npu, seed, use_togsimulator=False):
+def run_decode(model_id, context_len, batch, dtype, num_layers, device, npu, seed, use_togsimulator=False,
+               include_epilogue=False):
     label = "NPU" if npu else "CPU"
     print(f"\n[Running GPT-NeoX-20B DECODE-only phase, {label}, context_len={context_len}, batch={batch}]")
     model, config, torch_dtype, loader = _build_model_and_loader(model_id, dtype, device, num_layers)
     input_ids, attention_mask, past_key_values = _build_phase_inputs(
         "decode", config, batch, context_len, seed, torch_dtype, device
     )
-    logits = _run_forward(model, loader, input_ids, attention_mask, past_key_values, device, torch_dtype, config, npu,
-                           use_togsimulator)
-    print(f"[Decode] done. logits shape={tuple(logits.shape)}")
+    output = _run_forward(model, loader, input_ids, attention_mask, past_key_values, device, torch_dtype, config, npu,
+                           use_togsimulator, include_epilogue=include_epilogue)
+    kind = "logits" if include_epilogue else "hidden_states (--epilogue not set)"
+    print(f"[Decode] done. {kind} shape={tuple(output.shape)}")
 
 
 def _report_comparison(name, out, ref, rtol, atol):
@@ -274,7 +281,7 @@ if __name__ == "__main__":
                               "NPU output is all zeros and the comparison is meaningless.")
     parser.add_argument("--rtol", type=float, default=1e-3)
     parser.add_argument("--atol", type=float, default=1e-3)
-    parser.add_argument("--togsimulator", action=argparse.BooleanOptionalAction, default=False,
+    parser.add_argument("--togsimulator", action=argparse.BooleanOptionalAction, default=True,
                          help="Wrap the NPU forward in a TOGSimulator() context so its kernels "
                               "dispatch through a single persistent TOGSim process instead of "
                               "TOGSimulator.run_standalone() spawning a fresh TOGSim process per "
@@ -307,6 +314,14 @@ if __name__ == "__main__":
                               "data movement (see TOGSim/include/ZeroComputeMode.h). Use it to get "
                               "the lower bound the memory system alone imposes -- how much of the "
                               "runtime is flash, not the systolic array. Sets TOGSIM_ZERO_COMPUTE.")
+    parser.add_argument("--epilogue", action=argparse.BooleanOptionalAction, default=False,
+                         help="Include the final final_layer_norm + embed_out projection to vocab "
+                              "logits after the --num_layers decoder layers. Off by default for a "
+                              "plain --phase run: that epilogue is a separate, unrelated norm plus "
+                              "a large matmul against the full vocab, which has nothing to do with "
+                              "timing --num_layers decoder layers in isolation. No effect with "
+                              "--compare, which always needs real logits to diff against the CPU "
+                              "reference.")
     args = parser.parse_args()
 
     if args.ssd_backend:
@@ -332,7 +347,7 @@ if __name__ == "__main__":
             torch.compiler.is_compiling = lambda: True  # FIXME. How to fix this?
         if args.phase == "prefill":
             run_prefill(args.hf_model, args.seq_len, args.batch, args.dtype, args.num_layers, device, args.npu, args.seed,
-                        use_togsimulator=args.togsimulator)
+                        use_togsimulator=args.togsimulator, include_epilogue=args.epilogue)
         else:
             run_decode(args.hf_model, args.context_len, args.batch, args.dtype, args.num_layers, device, args.npu, args.seed,
-                       use_togsimulator=args.togsimulator)
+                       use_togsimulator=args.togsimulator, include_epilogue=args.epilogue)

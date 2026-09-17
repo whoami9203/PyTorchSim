@@ -17,7 +17,7 @@ def test_result(name, out, cpu_out, rtol=1e-4, atol=1e-4):
         print("cpu out: ", cpu_out)
         exit(1)
 
-def test_LayerNorm(device, size=(64, 64)):
+def test_LayerNorm(device, size=(512, 512)):
     torch.manual_seed(0)
     input = torch.randn(size)
     x1 = input.to(device=device)
