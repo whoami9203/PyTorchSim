@@ -298,6 +298,7 @@ src/CMakeFiles/Simulator.dir/DMA.cc.o: \
  /usr/include/c++/11/pstl/glue_numeric_defs.h /usr/include/c++/11/set \
  /usr/include/c++/11/bits/stl_set.h \
  /usr/include/c++/11/bits/stl_multiset.h \
+ /workspace/legomerged/eclab_legosim/PyTorchSim/TOGSim/include/ZeroComputeMode.h \
  /workspace/legomerged/eclab_legosim/PyTorchSim/TOGSim/include/SimulationConfig.h \
  /usr/include/c++/11/filesystem /usr/include/c++/11/bits/fs_fwd.h \
  /usr/include/c++/11/bits/fs_path.h /usr/include/c++/11/locale \
@@ -370,5 +371,6 @@ src/CMakeFiles/Simulator.dir/DMA.cc.o: \
  /usr/include/c++/11/bits/unordered_set.h \
  /workspace/legomerged/eclab_legosim/PyTorchSim/TOGSim/include/TileGraph.h \
  /workspace/legomerged/eclab_legosim/PyTorchSim/TOGSim/include/IntervalTree.h \
+ /workspace/legomerged/eclab_legosim/PyTorchSim/TOGSim/include/SingleShotWeightGate.h \
  /workspace/legomerged/eclab_legosim/PyTorchSim/TOGSim/include/TraceLogTags.h \
  /workspace/legomerged/eclab_legosim/PyTorchSim/TOGSim/include/WeightAddressRanges.h

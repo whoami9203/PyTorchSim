@@ -255,21 +255,16 @@ def _dump_module_weight_ranges(module, name_prefix):
     os.makedirs(out_dir, exist_ok=True)
     out_path = os.path.join(out_dir, "model_weight_ranges.txt")
     # input_layernorm.weight/post_attention_layernorm.weight are tiny (a few
-    # KB) and the compiled kernel DMAs each in many small fragments, so
-    # routing them through the live SSD path charged their (tiny, real)
-    # latency once per fragment -- wildly overstating the cost of loading a
-    # few KB. Rather than model that in TOGSim, just don't register their
-    # addresses as weight ranges at all: leaving them out of this file means
-    # WeightAddressRanges never classifies their DMAs as weight accesses, so
-    # they fall through to the ordinary DRAM timing path like any other
-    # non-weight tensor (activations, KV cache, ...). Add the SSD latency
-    # for these two separately/manually instead of through this live path.
-    excluded_suffixes = ("input_layernorm.weight", "post_attention_layernorm.weight")
+    # KB) 1-D tensors, and the compiled kernel DMAs each in many small
+    # fragments since there's no dedicated kernel template for them the way
+    # GEMM inputs get one. merge_weight_ranges.py's model_weight_ranges_1d.txt
+    # output (derived from this file's shape= field) lets TOGSim's
+    # SingleShotWeightGate bill each of them once per load instead of once
+    # per fragment, so there's no need to exclude them from this file the
+    # way an earlier version of this function did.
     with open(out_path, "w") as f:
         for name, p in module.named_parameters(recurse=True):
             if p is None:
-                continue
-            if name.endswith(excluded_suffixes):
                 continue
             base = p.data_ptr()
             size_bytes = p.untyped_storage().size()

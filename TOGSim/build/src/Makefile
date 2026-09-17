@@ -392,6 +392,30 @@ DramLegoSimLink.cc.s:
 	cd /workspace/legomerged/eclab_legosim/PyTorchSim/TOGSim/build && $(MAKE) $(MAKESILENT) -f src/CMakeFiles/Simulator.dir/build.make src/CMakeFiles/Simulator.dir/DramLegoSimLink.cc.s
 .PHONY : DramLegoSimLink.cc.s
 
+FlashAddressMap.o: FlashAddressMap.cc.o
+.PHONY : FlashAddressMap.o
+
+# target to build an object file
+FlashAddressMap.cc.o:
+	cd /workspace/legomerged/eclab_legosim/PyTorchSim/TOGSim/build && $(MAKE) $(MAKESILENT) -f src/CMakeFiles/Simulator.dir/build.make src/CMakeFiles/Simulator.dir/FlashAddressMap.cc.o
+.PHONY : FlashAddressMap.cc.o
+
+FlashAddressMap.i: FlashAddressMap.cc.i
+.PHONY : FlashAddressMap.i
+
+# target to preprocess a source file
+FlashAddressMap.cc.i:
+	cd /workspace/legomerged/eclab_legosim/PyTorchSim/TOGSim/build && $(MAKE) $(MAKESILENT) -f src/CMakeFiles/Simulator.dir/build.make src/CMakeFiles/Simulator.dir/FlashAddressMap.cc.i
+.PHONY : FlashAddressMap.cc.i
+
+FlashAddressMap.s: FlashAddressMap.cc.s
+.PHONY : FlashAddressMap.s
+
+# target to generate assembly for a file
+FlashAddressMap.cc.s:
+	cd /workspace/legomerged/eclab_legosim/PyTorchSim/TOGSim/build && $(MAKE) $(MAKESILENT) -f src/CMakeFiles/Simulator.dir/build.make src/CMakeFiles/Simulator.dir/FlashAddressMap.cc.s
+.PHONY : FlashAddressMap.cc.s
+
 Hashing.o: Hashing.cc.o
 .PHONY : Hashing.o
 
@@ -511,6 +535,30 @@ Simulator.s: Simulator.cc.s
 Simulator.cc.s:
 	cd /workspace/legomerged/eclab_legosim/PyTorchSim/TOGSim/build && $(MAKE) $(MAKESILENT) -f src/CMakeFiles/Simulator.dir/build.make src/CMakeFiles/Simulator.dir/Simulator.cc.s
 .PHONY : Simulator.cc.s
+
+SingleShotWeightGate.o: SingleShotWeightGate.cc.o
+.PHONY : SingleShotWeightGate.o
+
+# target to build an object file
+SingleShotWeightGate.cc.o:
+	cd /workspace/legomerged/eclab_legosim/PyTorchSim/TOGSim/build && $(MAKE) $(MAKESILENT) -f src/CMakeFiles/Simulator.dir/build.make src/CMakeFiles/Simulator.dir/SingleShotWeightGate.cc.o
+.PHONY : SingleShotWeightGate.cc.o
+
+SingleShotWeightGate.i: SingleShotWeightGate.cc.i
+.PHONY : SingleShotWeightGate.i
+
+# target to preprocess a source file
+SingleShotWeightGate.cc.i:
+	cd /workspace/legomerged/eclab_legosim/PyTorchSim/TOGSim/build && $(MAKE) $(MAKESILENT) -f src/CMakeFiles/Simulator.dir/build.make src/CMakeFiles/Simulator.dir/SingleShotWeightGate.cc.i
+.PHONY : SingleShotWeightGate.cc.i
+
+SingleShotWeightGate.s: SingleShotWeightGate.cc.s
+.PHONY : SingleShotWeightGate.s
+
+# target to generate assembly for a file
+SingleShotWeightGate.cc.s:
+	cd /workspace/legomerged/eclab_legosim/PyTorchSim/TOGSim/build && $(MAKE) $(MAKESILENT) -f src/CMakeFiles/Simulator.dir/build.make src/CMakeFiles/Simulator.dir/SingleShotWeightGate.cc.s
+.PHONY : SingleShotWeightGate.cc.s
 
 SparseCore.o: SparseCore.cc.o
 .PHONY : SparseCore.o
@@ -792,6 +840,9 @@ help:
 	@echo "... DramLegoSimLink.o"
 	@echo "... DramLegoSimLink.i"
 	@echo "... DramLegoSimLink.s"
+	@echo "... FlashAddressMap.o"
+	@echo "... FlashAddressMap.i"
+	@echo "... FlashAddressMap.s"
 	@echo "... Hashing.o"
 	@echo "... Hashing.i"
 	@echo "... Hashing.s"
@@ -807,6 +858,9 @@ help:
 	@echo "... Simulator.o"
 	@echo "... Simulator.i"
 	@echo "... Simulator.s"
+	@echo "... SingleShotWeightGate.o"
+	@echo "... SingleShotWeightGate.i"
+	@echo "... SingleShotWeightGate.s"
 	@echo "... SparseCore.o"
 	@echo "... SparseCore.i"
 	@echo "... SparseCore.s"

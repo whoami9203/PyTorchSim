@@ -3,6 +3,7 @@
 #include "SsdLegoSimLink.h"
 #include "SsdTrace.h"
 #include "TileGraph.h"
+#include "SingleShotWeightGate.h"
 #include "TraceLogTags.h"
 #include "WeightAddressRanges.h"
 
@@ -54,6 +55,50 @@ std::shared_ptr<std::vector<mem_fetch*>> DMA::get_memory_access(cycle_type core_
     return access_vec;
 
   if (!_generated_once) {
+    // Single-shot billing for tiny 1-D weights (LayerNorm/RMSNorm
+    // weight/bias): decided once here, up front, before any of the
+    // SSD/DRAM-legosim/raw-DRAM branches below, so it holds in every mode --
+    // not just when the live SSD path happens to be enabled. The compiled
+    // kernel that reads one of these tensors has no dedicated template the
+    // way GEMM inputs get one, so it DMAs the tensor in many small
+    // fragments; billing each fragment independently (in whichever timing
+    // model is active) wildly overstates the cost of moving a few KB.
+    //
+    // Instead: the fragment that first touches a tracked tensor (address ==
+    // tensor base) is treated as if it moved the tensor's *entire* size in
+    // one shot; every later fragment landing in the same tensor (until its
+    // address is reused for the next layer's load) completes with zero
+    // bytes of traffic, since the tensor is already resident. See
+    // SingleShotWeightGate.h.
+    bool gate_should_charge = true;
+    uint64_t gate_tensor_bytes = 0;
+    bool gate_matched = false;
+    uint64_t gate_base_addr = 0;
+    if (_current_inst->is_dma_read()) {
+      gate_base_addr = static_cast<uint64_t>(_current_inst->get_base_dram_address());
+      gate_matched = SingleShotWeightGate::instance().classify(
+          gate_base_addr, &gate_should_charge, &gate_tensor_bytes);
+    }
+
+    if (gate_matched && !gate_should_charge) {
+      // Already loaded this epoch -- complete with (near) zero added
+      // latency, generating no real mem_fetch requests. This *must* go
+      // through the same fixed-latency "external oracle" completion route
+      // update_ssd()/take_ssd_finished() give the SSD/DRAM-legosim paths
+      // (see the have_latency branch below and Core::dma_cycle()'s comment
+      // on bypassing the real Dram/Interconnect model): a synchronous DMA
+      // read only ever finishes via a real mem_fetch response decrementing
+      // Instruction::get_waiting_request() to 0, or via this oracle path --
+      // there is no third way to finish an instruction that issued zero
+      // requests. Setting _finished=true directly here without a request
+      // still parks the instruction in Core::_dma_waiting_queue forever,
+      // since nothing will ever call push_memory_response() for it.
+      _ssd_pending = true;
+      _ssd_finish_cycle = core_cycle + 1;
+      _finished = false;
+      return access_vec;
+    }
+
     uint64_t latency_ns = 0;
     bool have_latency = false;
     if (_current_inst->is_dma_read()) {
@@ -70,11 +115,16 @@ std::shared_ptr<std::vector<mem_fetch*>> DMA::get_memory_access(cycle_type core_
         // instead works because PyTorchSimDevice's tensors are backed by
         // real host memory, so a weight's data_ptr() on the Python side is
         // the exact same address reported here. See WeightAddressRanges.h.
-        const uint64_t base_addr = static_cast<uint64_t>(_current_inst->get_base_dram_address());
+        const uint64_t base_addr = gate_base_addr;
         if (WeightAddressRanges::instance().is_weight_address(base_addr)) {
-          const uint64_t total_bits = static_cast<uint64_t>(_current_inst->get_tile_numel()) *
-                                      static_cast<uint64_t>(_current_inst->get_elem_bits());
-          const uint64_t total_bytes = (total_bits + 7) >> 3;
+          uint64_t total_bytes;
+          if (gate_matched) {
+            total_bytes = gate_tensor_bytes;
+          } else {
+            const uint64_t total_bits = static_cast<uint64_t>(_current_inst->get_tile_numel()) *
+                                        static_cast<uint64_t>(_current_inst->get_elem_bits());
+            total_bytes = (total_bits + 7) >> 3;
+          }
           latency_ns = SsdLegoSimLink::instance().query_latency_ns(
               base_addr, total_bytes, _current_inst->get_global_inst_id(),
               _current_inst->get_addr_name(), static_cast<uint64_t>(core_cycle));
@@ -92,9 +142,14 @@ std::shared_ptr<std::vector<mem_fetch*>> DMA::get_memory_access(cycle_type core_
       // mode fully replace Dram/Interconnect rather than just standing in
       // for weight reads the way the SSD path does.
       const uint64_t base_addr = static_cast<uint64_t>(_current_inst->get_base_dram_address());
-      const uint64_t total_bits = static_cast<uint64_t>(_current_inst->get_tile_numel()) *
-                                  static_cast<uint64_t>(_current_inst->get_elem_bits());
-      const uint64_t total_bytes = (total_bits + 7) >> 3;
+      uint64_t total_bytes;
+      if (gate_matched) {
+        total_bytes = gate_tensor_bytes;
+      } else {
+        const uint64_t total_bits = static_cast<uint64_t>(_current_inst->get_tile_numel()) *
+                                    static_cast<uint64_t>(_current_inst->get_elem_bits());
+        total_bytes = (total_bits + 7) >> 3;
+      }
       latency_ns = DramLegoSimLink::instance().query_latency_ns(
           base_addr, total_bytes, _current_inst->get_global_inst_id(),
           _current_inst->get_addr_name(), static_cast<uint64_t>(core_cycle));
@@ -113,8 +168,21 @@ std::shared_ptr<std::vector<mem_fetch*>> DMA::get_memory_access(cycle_type core_
       _finished = false;
       return access_vec;
     }
-    std::shared_ptr<std::set<addr_type>> addr_set =
-      _current_inst->get_dram_address(_dram_req_size);
+
+    std::shared_ptr<std::set<addr_type>> addr_set;
+    if (gate_matched) {
+      // Raw Dram/Interconnect path, first touch of a tracked 1-D tensor:
+      // request its entire byte range in one shot instead of just this
+      // fragment's own (small) footprint, so the cycle-accurate DRAM model
+      // bills the full tensor once instead of once per fragment.
+      addr_set = std::make_shared<std::set<addr_type>>();
+      const addr_type tensor_end = static_cast<addr_type>(gate_base_addr + gate_tensor_bytes);
+      for (addr_type a = static_cast<addr_type>(gate_base_addr); a < tensor_end; a += _dram_req_size) {
+        addr_set->insert(a);
+      }
+    } else {
+      addr_set = _current_inst->get_dram_address(_dram_req_size);
+    }
 
     Tile* owner = (Tile*)_current_inst->get_owner();
     std::shared_ptr<TileSubGraph> owner_subgraph = owner->get_owner();

@@ -356,6 +356,7 @@ src/CMakeFiles/Simulator.dir/SparseCore.cc.o: \
  /usr/include/c++/11/bits/fstream.tcc /usr/include/c++/11/numeric \
  /usr/include/c++/11/bits/stl_numeric.h \
  /usr/include/c++/11/pstl/glue_numeric_defs.h \
+ /workspace/legomerged/eclab_legosim/PyTorchSim/TOGSim/include/ZeroComputeMode.h \
  /workspace/legomerged/eclab_legosim/PyTorchSim/TOGSim/include/DMA.h \
  /workspace/legomerged/eclab_legosim/PyTorchSim/TOGSim/include/Tile.h \
  /workspace/legomerged/eclab_legosim/PyTorchSim/TOGSim/include/Memfetch.h \

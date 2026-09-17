@@ -4,6 +4,11 @@ import re
 from typing import List, Tuple
 
 RANGE_RE = re.compile(r"\bbase=(\d+)\b.*\bend=(\d+)\b")
+TENSOR_RE = re.compile(
+    r"^(?P<name>[^\t]+)\tbase=(?P<base>\d+)\tend=(?P<end>\d+)\tsize_bytes=(?P<size>\d+)"
+    r"\tshape=\((?P<shape>[^)]*)\)"
+)
+
 
 def parse_ranges(path: str) -> List[Tuple[int, int]]:
     ranges: List[Tuple[int, int]] = []
@@ -18,6 +23,31 @@ def parse_ranges(path: str) -> List[Tuple[int, int]]:
                 base, end = end, base
             ranges.append((base, end))
     return ranges
+
+
+def extract_1d_tensors(path: str) -> List[Tuple[str, int, int, int]]:
+    """Returns (name, base, end, size_bytes) for every tensor in `path` whose
+    shape has exactly one dimension -- LayerNorm/RMSNorm weight and bias
+    vectors. Kept as individual, unmerged rows (unlike merge_ranges() above)
+    so SingleShotWeightGate can track each tensor's own address span rather
+    than a coalesced range that may also cover an unrelated neighbor.
+    """
+    tensors: List[Tuple[str, int, int, int]] = []
+    with open(path, "r") as f:
+        for line in f:
+            match = TENSOR_RE.match(line)
+            if not match:
+                continue
+            dims = [d.strip() for d in match.group("shape").split(",") if d.strip() != ""]
+            if len(dims) != 1:
+                continue
+            tensors.append((
+                match.group("name"),
+                int(match.group("base")),
+                int(match.group("end")),
+                int(match.group("size")),
+            ))
+    return tensors
 
 
 def merge_ranges(ranges: List[Tuple[int, int]]) -> List[Tuple[int, int]]:
@@ -70,6 +100,14 @@ def main() -> None:
 
     print(f"Parsed {len(ranges)} ranges, merged to {len(merged)} ranges.")
     print(f"Output: {output_path}")
+
+    tensors_1d = extract_1d_tensors(input_path)
+    output_1d_path = os.path.join(os.path.dirname(output_path), "model_weight_ranges_1d.txt")
+    with open(output_1d_path, "w") as f:
+        for name, base, end, size_bytes in tensors_1d:
+            f.write(f"{name}\t{base}\t{end}\t{size_bytes}\n")
+
+    print(f"Found {len(tensors_1d)} 1-D tensor(s), written to {output_1d_path}")
 
 
 if __name__ == "__main__":

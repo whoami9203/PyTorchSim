@@ -352,6 +352,7 @@ src/CMakeFiles/Simulator.dir/Common.cc.o: \
  /usr/include/c++/11/bits/fstream.tcc /usr/include/c++/11/numeric \
  /usr/include/c++/11/bits/stl_numeric.h \
  /usr/include/c++/11/pstl/glue_numeric_defs.h \
+ /workspace/legomerged/eclab_legosim/PyTorchSim/TOGSim/include/ZeroComputeMode.h \
  /workspace/legomerged/eclab_legosim/PyTorchSim/TOGSim/include/Dram.h \
  /usr/include/c++/11/optional \
  /workspace/legomerged/eclab_legosim/PyTorchSim/TOGSim/include/DMA.h \
