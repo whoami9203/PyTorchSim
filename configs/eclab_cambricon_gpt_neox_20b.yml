@@ -1,0 +1,40 @@
+num_cores: 1
+core_freq_mhz: 1000
+core_stats_print_period_cycles: 100000
+
+vpu_num_lanes: 32
+vpu_spad_size_kb_per_lane: 256
+vpu_vector_length_bits: 128
+
+dram_type: ramulator2
+
+dram_channels: 4
+dram_stats_print_period_cycles: 100000
+ramulator_config_path: ../configs/ramulator2_configs/LPDDR5X_9600.yaml
+
+icnt_type: booksim2
+icnt_freq_mhz: 1000
+icnt_injection_ports_per_core: 8
+booksim_config_path: ../configs/booksim2_configs/fly_c8_m4.icnt
+
+pytorchsim_functional_mode: 0
+pytorchsim_timing_mode: 1
+
+# Same as eclab_cambricon.yml, except GEMM/GEMV tiling falls back to the JSON
+# named below for any (M,N,K) shape listed there, and to the normal heuristic
+# search (gemm_combination_mapping) for everything else. That JSON is a build
+# artifact, not meant to be hand-edited -- it's generated from a human-
+# readable spec by PyTorchSimFrontend/tile_overrides.py, e.g.:
+#
+#   python3 -m PyTorchSimFrontend.tile_overrides \
+#       configs/tile_overrides/gpt_neox_20b.yaml \
+#       configs/tile_overrides/gpt_neox_20b.generated.json
+#
+# tests/GPT/sim_GPT_NeoX_20B.py and test_GPT_NeoX_20B.py call apply_tile_overrides()
+# themselves on every NPU run, so editing the .yaml is enough -- no separate
+# regeneration step needed when using those scripts.
+codegen_mapping_strategy: external-then-heuristic
+codegen_external_mapping_file: /workspace/legomerged/eclab_legosim/PyTorchSim/configs/tile_overrides/gpt_neox_20b.generated.json
+codegen_autotune_max_retry: 10
+codegen_autotune_template_topk: 4
+codegen_compiler_optimization: all

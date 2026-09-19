@@ -13,6 +13,10 @@ from test_GPT_NeoX_20B import (
     _forward_streamed_npu,
     _prelude,
     _epilogue,
+    replace_linear_with_transposed_,
+    apply_tile_overrides,
+    TILE_OVERRIDE_YAML,
+    TILE_OVERRIDE_JSON,
 )
 
 DTYPE_MAP = {"float32": torch.float32, "float16": torch.float16, "bfloat16": torch.bfloat16}
@@ -31,6 +35,21 @@ def _build_model_and_loader(model_id, dtype, device, num_layers):
 
     print("Building model skeleton on the meta device (no weights loaded yet)")
     model = _build_meta_model(config, torch_dtype)
+
+    # NPU only: replace query_key_value/dense/dense_h_to_4h/dense_4h_to_h with
+    # TransposedLinear so their weight lands on the NPU pre-transposed instead of via
+    # F.linear's implicit transpose (DRAM-bandwidth fix, see
+    # PyTorchSimFrontend/transposed_linear.py). Left as plain nn.Linear on CPU --
+    # TransposedLinear computes the identical result either way, so this only changes
+    # which path each device takes, not what either one computes.
+    if device.type == "npu":
+        replace_linear_with_transposed_(model.gpt_neox.layers)
+        # Manual per-shape tile-size overrides -- see
+        # configs/tile_overrides/gpt_neox_20b.yaml for what's in it and why. Only
+        # takes effect if TOGSIM_CONFIG also has codegen_mapping_strategy:
+        # external-then-heuristic (configs/eclab_cambricon_gpt_neox_tile_overrides.yml).
+        apply_tile_overrides(TILE_OVERRIDE_YAML, TILE_OVERRIDE_JSON)
+
     # Rotary table is config-derived rather than checkpoint-derived (see _build_meta_model), and
     # comes out real-valued but CPU-resident -- move it onto the target device by hand, same as
     # sim_llama2_7B.py does for model.model.rotary_emb.

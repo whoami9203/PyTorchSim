@@ -1,0 +1,35 @@
+# Manual GEMM/GEMV tile-size overrides for GPT-NeoX-20B's decode-time (M=1)
+# linear projections. Consumed by PyTorchSimFrontend/tile_overrides.py's
+# apply_tile_overrides(), which turns this into the raw "M_N_K"-keyed JSON
+# that PyTorchSim's codegen_external_mapping_file actually reads (see
+# select_tile() in PyTorchSimFrontend/mlir/mlir_gemm_template.py).
+#
+# GPT-NeoX-20B has 4 distinct projections per layer (hidden_size=6144,
+# intermediate_size=24576):
+#   query_key_value: in_features=6144,  out_features=18432 (3*hidden_size, fused QKV)
+#   dense:           in_features=6144,  out_features=6144
+#   dense_h_to_4h:   in_features=6144,  out_features=24576
+#   dense_4h_to_h:   in_features=24576, out_features=6144
+#
+# Verified after porting the TransposedLinear layout fix (see
+# PyTorchSimFrontend/transposed_linear.py) over from Llama2-7B: query_key_value,
+# dense, and dense_h_to_4h all jumped from 33-46% to ~93.6-93.9% DRAM utilization
+# on the fix alone (no override needed). dense_4h_to_h is the exact same pattern
+# as Llama2-7B's down_proj (large K reducing into a smaller N) -- it actually
+# *regressed* from an accidentally-good 93.80% (under the old broken layout, its
+# heuristic-picked TILE_K=24576 happened to be huge) to 33.61% once the layout
+# was fixed and it became genuinely N-tiled (TILE_N=64, MOVOUT=96). Same fix.
+#
+# Fields (see configs/tile_overrides/llama2_7b.yaml for the full field list):
+#   in_features / out_features / tile_m / tile_n / tile_k / m (optional, default 1)
+
+dense_4h_to_h:
+  in_features: 24576   # K = intermediate_size
+  out_features: 6144   # N = hidden_size
+  tile_m: 8
+  tile_n: 6144   # = out_features (N). Heuristic picks TILE_N=64 (MOVOUT=96,
+                 # 33.61% DRAM util); TILE_N=6144 (single N-tile) measured
+                 # 93.6%+, matching the other three projections.
+  tile_k: 256    # largest TILE_K gemm_combination_mapping's own candidate
+                 # search reports as feasible under the half-scratchpad cap
+                 # once TILE_N is fixed at 6144.

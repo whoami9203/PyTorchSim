@@ -25,6 +25,17 @@ from transformers.cache_utils import StaticCache
 from transformers.masking_utils import create_causal_mask
 from transformers.models.gpt_neox.modeling_gpt_neox import GPTNeoXRotaryEmbedding
 
+from PyTorchSimFrontend.tile_overrides import apply_tile_overrides
+from PyTorchSimFrontend.transposed_linear import TransposedLinear, replace_linear_with_transposed_
+
+# See PyTorchSimFrontend/tile_overrides.py and configs/tile_overrides/gpt_neox_20b.yaml
+# for what these are and how to add/edit entries. Regenerating the JSON here is a
+# no-op unless TOGSIM_CONFIG also points at a config with codegen_mapping_strategy:
+# external-then-heuristic (see configs/eclab_cambricon_gpt_neox_tile_overrides.yml) --
+# safe to call unconditionally either way.
+_PYTORCHSIM_ROOT = os.environ.get("PYTORCHSIM_ROOT_PATH", "/workspace/PyTorchSim")
+TILE_OVERRIDE_YAML = os.path.join(_PYTORCHSIM_ROOT, "configs/tile_overrides/gpt_neox_20b.yaml")
+TILE_OVERRIDE_JSON = os.path.join(_PYTORCHSIM_ROOT, "configs/tile_overrides/gpt_neox_20b.generated.json")
 
 DEFAULT_MODEL_ID = "EleutherAI/gpt-neox-20b"
 DEFAULT_PROMPT = "Once upon a time in a land far away,"
@@ -120,8 +131,39 @@ class StreamedCheckpointLoader:
         return handle
 
     def load_module_(self, module, prefix, device, dtype):
-        """Materializes `module`'s parameters from the checkpoint onto `device`."""
+        """Materializes `module`'s parameters from the checkpoint onto `device`.
+
+        TransposedLinear submodules (see PyTorchSimFrontend/transposed_linear.py)
+        need their weight transposed relative to what's actually stored in the
+        checkpoint (nn.Linear's standard (out_features, in_features)). That
+        transpose happens right here, right after the tensor is read off disk --
+        on host, outside any torch.compile'd region -- at the cost of paying it
+        again on every load: this loader re-streams every layer's weights fresh
+        on every decode step, nothing is cached across calls. Same pattern as
+        tests/Llama/test_llama2_7B.py's StreamedCheckpointLoader.load_module_."""
+        handled = set()
+        for sub_name, submodule in module.named_modules():
+            if not isinstance(submodule, TransposedLinear):
+                continue
+            sub_prefix = f"{prefix}.{sub_name}" if sub_name else prefix
+
+            weight_key = "weight" if not sub_name else f"{sub_name}.weight"
+            full_weight_name = f"{sub_prefix}.weight"
+            tensor = self._handle(self.weight_map[full_weight_name]).get_tensor(full_weight_name).to(dtype=dtype)
+            tensor = tensor.t().contiguous()  # (out_features, in_features) -> (in_features, out_features)
+            set_module_tensor_to_device(submodule, "weight", device, value=tensor)
+            handled.add(weight_key)
+
+            if submodule.bias is not None:
+                bias_key = "bias" if not sub_name else f"{sub_name}.bias"
+                full_bias_name = f"{sub_prefix}.bias"
+                bias_tensor = self._handle(self.weight_map[full_bias_name]).get_tensor(full_bias_name).to(dtype=dtype)
+                set_module_tensor_to_device(submodule, "bias", device, value=bias_tensor)
+                handled.add(bias_key)
+
         for name, _ in list(module.named_parameters(recurse=True)):
+            if name in handled:
+                continue
             full_name = f"{prefix}.{name}"
             tensor = self._handle(self.weight_map[full_name]).get_tensor(full_name).to(dtype=dtype)
             set_module_tensor_to_device(module, name, device, value=tensor)
@@ -451,6 +493,19 @@ def generate_streamed_npu(
 
     print("Building model skeleton on the meta device (no weights loaded yet)")
     model = _build_meta_model(config, torch_dtype)
+
+    # Replace query_key_value/dense/dense_h_to_4h/dense_4h_to_h (all nn.Linear) with
+    # TransposedLinear so their weight lands on the NPU pre-transposed instead of via
+    # F.linear's implicit transpose (DRAM-bandwidth fix -- see
+    # PyTorchSimFrontend/transposed_linear.py). Still on the meta device here;
+    # StreamedCheckpointLoader.load_module_ materializes (and transposes) the real
+    # weight per layer per decode step, same as everything else.
+    replace_linear_with_transposed_(model.gpt_neox.layers)
+    # Manual per-shape tile-size overrides -- see
+    # configs/tile_overrides/gpt_neox_20b.yaml for what's in it and why. Only takes
+    # effect if TOGSIM_CONFIG also has codegen_mapping_strategy: external-then-heuristic
+    # (configs/eclab_cambricon_gpt_neox_tile_overrides.yml).
+    apply_tile_overrides(TILE_OVERRIDE_YAML, TILE_OVERRIDE_JSON)
 
     print("Resolving local checkpoint shards")
     loader = StreamedCheckpointLoader(model_id)

@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -lt 1 ]]; then
-	echo "Usage: $0 TRACE_NAME [TOGSIM_LEGOSIM_SSD] [TOGSIM_LEGOSIM_DRAM] [TOGSIM_CONFIG_PATH]"
+if [[ $# -lt 4 ]]; then
+	echo "Usage: $0 TRACE_NAME [TOGSIM_LEGOSIM_SSD] [TOGSIM_LEGOSIM_DRAM] TOGSIM_CONFIG_PATH"
+	echo "  TOGSIM_CONFIG_PATH is required (no silent default -- there's more than one"
+	echo "  model's config now) and relative to the repo root, e.g.:"
+	echo "    configs/eclab_cambricon_llama2_7B.yml"
+	echo "    configs/eclab_cambricon_gpt_neox_20b.yml"
 	exit 1
 fi
 
@@ -11,7 +15,7 @@ fi
 TRACE_NAME=$1
 TOGSIM_LEGOSIM_SSD=${2:-0}
 TOGSIM_LEGOSIM_DRAM=${3:-0}
-TOGSIM_CONFIG_PATH=${4:-}
+TOGSIM_CONFIG_PATH=$4
 # A real popnet always runs in phase2 (instead of the default no-op filler)
 # whenever either simlet above is enabled, so interchiplet's two-phase
 # fixed-point loop always runs for real testing -- no separate NoC toggle.
@@ -28,12 +32,13 @@ if [[ "${TOGSIM_LEGOSIM_DRAM}" != "0" && "${TOGSIM_LEGOSIM_DRAM}" != "1" ]]; the
 	exit 1
 fi
 
-if [[ -n "${TOGSIM_CONFIG_PATH}" && ! -f "${TOGSIM_CONFIG_PATH}" ]]; then
-	echo "Error: TOGSIM_CONFIG_PATH '${TOGSIM_CONFIG_PATH}' does not exist"
+export TORCHSIM_DIR=/workspace/legomerged/eclab_legosim/PyTorchSim
+
+if [[ ! -f "${TORCHSIM_DIR}/${TOGSIM_CONFIG_PATH}" ]]; then
+	echo "Error: TOGSIM_CONFIG_PATH '${TOGSIM_CONFIG_PATH}' does not exist under ${TORCHSIM_DIR}"
 	exit 1
 fi
 
-export TORCHSIM_DIR=/workspace/legomerged/eclab_legosim/PyTorchSim
 export PYTORCHSIM_ROOT_PATH=${TORCHSIM_DIR}
 export TOGSIM_DEBUG_LEVEL=info
 export TOGSIM_SSD_TRACE_NAME=${TRACE_NAME}
