@@ -1,0 +1,36 @@
+# Manual GEMM/GEMV tile-size overrides for Llama2-7B's decode-time (M=1)
+# linear projections. Consumed by PyTorchSimFrontend/tile_overrides.py's
+# apply_tile_overrides(), which turns this into the raw "M_N_K"-keyed JSON
+# that PyTorchSim's codegen_external_mapping_file actually reads (see
+# select_tile() in PyTorchSimFrontend/mlir/mlir_gemm_template.py).
+#
+# Leave a projection out entirely to let the heuristic search
+# (gemm_combination_mapping) choose its tile on its own -- q_proj/k_proj/
+# v_proj/o_proj/gate_proj/up_proj already reach ~93% DRAM utilization under
+# the heuristic's own choice at decode time and don't need an entry here.
+#
+# Fields:
+#   in_features / out_features -- nn.Linear's shape convention (weight is
+#     (out_features, in_features)); become K / N. Requires the weight to
+#     reach the NPU already (K,N)-contiguous (see TransposedLinear in
+#     tests/Llama/test_llama2_7B.py) -- these numbers won't match what
+#     PyTorchSim actually traces if the weight is still in nn.Linear's
+#     native (N,K) layout.
+#   tile_m / tile_n / tile_k -- passed straight through as TILE_M/TILE_N/TILE_K.
+#   m -- optional, defaults to 1 (decode-time GEVM). Set explicitly for a
+#     prefill/batched shape.
+
+down_proj:
+  in_features: 11008   # K = intermediate_size
+  out_features: 4096   # N = hidden_size
+  tile_m: 8
+  # TILE_N=out_features (N): the heuristic's own search picks TILE_N=128 for
+  # this shape, which forces 32 separate N-tiles (MOVOUT=32), each re-loading
+  # the whole M=1 activation vector and fragmenting DRAM bursts -- measured
+  # 38.78% DRAM utilization, 21.42% row-buffer hit rate. TILE_N=4096 (a
+  # single N-tile, MOVOUT=1) measured 93.71% utilization, 98.01% hit rate --
+  # full sweep across every TILE_N in between in tests/test_down_proj_tile_sweep.py.
+  tile_n: 4096
+  # Largest TILE_K gemm_combination_mapping's own candidate search reports as
+  # feasible under the half-scratchpad cap once TILE_N is fixed at 4096.
+  tile_k: 256

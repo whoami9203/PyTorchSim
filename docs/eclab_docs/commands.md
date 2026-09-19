@@ -1,13 +1,13 @@
 # 指令集
 設置環境變數,輸出位置
 ```bash
-#source setup_env_var.sh ${TOGSIM_SSD_TRACE_NAME} [0/1] [0/1]
+#source setup_env_var.sh ${TOGSIM_SSD_TRACE_NAME} [0/1] [0/1] [TOGSIM_CONFIG_PATH]
 # Original
-source setup_env_var.sh test1 0 0
+source setup_env_var.sh test1 0 0 configs/eclab_cambricon_llama2_7B.yml
 # With DRAM simlet linked by LegoSim (NoC always on when this or SSD is on)
-source setup_env_var.sh test1 0 1
+source setup_env_var.sh test1 0 1 configs/eclab_cambricon_llama2_7B.yml
 # With SSD simlet linked by LegoSim (NoC always on when this or SSD is on)
-source setup_env_var.sh test1 1 0
+source setup_env_var.sh test1 1 0 configs/eclab_cambricon_llama2_7B.yml
 ```
 
 Llama2-7B 存取權

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ $# -lt 1 ]]; then
-	echo "Usage: $0 TRACE_NAME [TOGSIM_LEGOSIM_SSD] [TOGSIM_LEGOSIM_DRAM]"
+	echo "Usage: $0 TRACE_NAME [TOGSIM_LEGOSIM_SSD] [TOGSIM_LEGOSIM_DRAM] [TOGSIM_CONFIG_PATH]"
 	exit 1
 fi
 
@@ -11,6 +11,7 @@ fi
 TRACE_NAME=$1
 TOGSIM_LEGOSIM_SSD=${2:-0}
 TOGSIM_LEGOSIM_DRAM=${3:-0}
+TOGSIM_CONFIG_PATH=${4:-}
 # A real popnet always runs in phase2 (instead of the default no-op filler)
 # whenever either simlet above is enabled, so interchiplet's two-phase
 # fixed-point loop always runs for real testing -- no separate NoC toggle.
@@ -24,6 +25,11 @@ fi
 
 if [[ "${TOGSIM_LEGOSIM_DRAM}" != "0" && "${TOGSIM_LEGOSIM_DRAM}" != "1" ]]; then
 	echo "Error: TOGSIM_LEGOSIM_DRAM must be 0 or 1 (got '${TOGSIM_LEGOSIM_DRAM}')"
+	exit 1
+fi
+
+if [[ -n "${TOGSIM_CONFIG_PATH}" && ! -f "${TOGSIM_CONFIG_PATH}" ]]; then
+	echo "Error: TOGSIM_CONFIG_PATH '${TOGSIM_CONFIG_PATH}' does not exist"
 	exit 1
 fi
 
@@ -42,7 +48,6 @@ export TOGSIM_SSD_TRACE_DIR=${TORCHSIM_DIR}/ssd_traces
 
 LOG_DIR=${TORCHSIM_DIR}/togsim_results/${TRACE_NAME}
 export TORCHSIM_LOG_PATH=${LOG_DIR}
-# export TOGSIM_CONFIG=${TORCHSIM_DIR}/configs/systolic_ws_128x128_c1_booksim_tpuv3.yml
-export TOGSIM_CONFIG=${TORCHSIM_DIR}/configs/eclab_cambricon.yml
+export TOGSIM_CONFIG=${TORCHSIM_DIR}/${TOGSIM_CONFIG_PATH}
 
 export TORCHSIM_DEBUG_MODE=0

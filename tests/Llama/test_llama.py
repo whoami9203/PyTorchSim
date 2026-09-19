@@ -398,7 +398,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Test Custom Llama (random weights, no tokenizer)")
     parser.add_argument("--batch", type=int, default=1)
     parser.add_argument("--seq_len", type=int, default=32)
-    parser.add_argument("--dtype", type=str, default="float32", choices=["float32", "float16", "bfloat16"])
+    parser.add_argument("--dtype", type=str, default="float16", choices=["float32", "float16", "bfloat16"])
     parser.add_argument("--rtol", type=float, default=1e-3)
     parser.add_argument("--atol", type=float, default=1e-3)
     parser.add_argument("--max_new_tokens", type=int, default=16)
@@ -408,8 +408,8 @@ if __name__ == "__main__":
     device = torch.device("npu:0")
     #test_triu(device, size=(32, 128), diagonal=1)
     torch.compiler.is_compiling = lambda: True # FIXME. How to fix this?
-    run_rmsnorm_test(device, dtype=args.dtype)
-    # run_rotary_embedding_test(device, dtype=args.dtype)
+    # run_rmsnorm_test(device, dtype=args.dtype)
+    run_rotary_embedding_test(device, dtype=args.dtype)
     # run_decoder_layer_test(
     #     device=device,
     #     batch=args.batch,

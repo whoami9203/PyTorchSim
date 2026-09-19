@@ -13,6 +13,74 @@ from transformers.masking_utils import create_causal_mask
 from transformers.models.llama.configuration_llama import LlamaConfig
 from transformers.models.llama.modeling_llama import LlamaForCausalLM, LlamaDecoderLayer, LlamaRMSNorm, LlamaRotaryEmbedding, LlamaModel
 
+from PyTorchSimFrontend.tile_overrides import apply_tile_overrides
+
+# See PyTorchSimFrontend/tile_overrides.py and configs/tile_overrides/llama2_7b.yaml
+# for what these are and how to add/edit entries. Regenerating the JSON here is a
+# no-op unless TOGSIM_CONFIG also points at a config with codegen_mapping_strategy:
+# external-then-heuristic (see configs/eclab_cambricon_tile_overrides.yml) -- safe
+# to call unconditionally either way.
+_PYTORCHSIM_ROOT = os.environ.get("PYTORCHSIM_ROOT_PATH", "/workspace/PyTorchSim")
+TILE_OVERRIDE_YAML = os.path.join(_PYTORCHSIM_ROOT, "configs/tile_overrides/llama2_7b.yaml")
+TILE_OVERRIDE_JSON = os.path.join(_PYTORCHSIM_ROOT, "configs/tile_overrides/llama2_7b.generated.json")
+
+
+class TransposedLinear(torch.nn.Module):
+    """Drop-in replacement for nn.Linear whose `weight` is stored (in_features,
+    out_features) instead of nn.Linear's (out_features, in_features).
+
+    nn.Linear.forward is `F.linear(input, self.weight, self.bias)`, which computes
+    `input @ self.weight.T` -- reading `weight` through an implicit transpose against
+    its real (out_features, in_features) checkpoint layout. On the NPU simulator this
+    fragments each DMA burst down to TILE_K elements instead of a full contiguous row,
+    which measured at Llama2-7B's q_proj/gate_proj GEMV shapes (M=1) as a ~2-2.5x drop
+    in achieved DRAM bandwidth and a collapse in DRAM row-buffer hit rate (33-98% ->
+    17-34%) -- see the conversation this came out of.
+
+    Storing `weight` pre-transposed and computing `input @ self.weight + self.bias`
+    (a contiguous-access matmul) restores the good access pattern. The tensor still has
+    to be physically transposed once somewhere -- StreamedCheckpointLoader.load_module_
+    does it right after reading the tensor off disk, on host, outside any
+    torch.compile'd region (see its docstring for why: doing it live inside a compiled
+    forward instead measured as strictly worse -- an extra ~5x-cycle, low-bandwidth
+    transpose kernel that didn't even make the following matmul faster).
+
+    Uses plain `matmul` + a separate bias-add (not `addmm`) so `forward` also works for
+    the 3D (batch, seq, hidden) inputs HF's LlamaAttention/LlamaMLP actually pass,
+    which `addmm` (2D operands only) can't handle -- the DRAM-layout benefit comes from
+    `weight`'s storage order, not from which op does the multiply.
+    """
+
+    def __init__(self, in_features, out_features, bias=True, dtype=None, device=None):
+        super().__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+        self.weight = torch.nn.Parameter(torch.empty(in_features, out_features, dtype=dtype, device=device))
+        if bias:
+            self.bias = torch.nn.Parameter(torch.empty(out_features, dtype=dtype, device=device))
+        else:
+            self.register_parameter("bias", None)
+
+    def forward(self, x):
+        out = torch.matmul(x, self.weight)
+        if self.bias is not None:
+            out = out + self.bias
+        return out
+
+
+def _replace_linear_with_transposed_(module):
+    """Recursively replaces every nn.Linear submodule of `module`, in place, with a
+    (still-empty/meta) TransposedLinear of matching shape -- StreamedCheckpointLoader
+    materializes its weight (pre-transposed) later. See TransposedLinear's docstring."""
+    for child_name, child in list(module.named_children()):
+        if isinstance(child, torch.nn.Linear):
+            setattr(module, child_name, TransposedLinear(
+                child.in_features, child.out_features, bias=child.bias is not None,
+                dtype=child.weight.dtype, device=child.weight.device,
+            ))
+        else:
+            _replace_linear_with_transposed_(child)
+
 
 class StreamedCheckpointLoader:
     """Reads weights straight out of the HF safetensors shards, one submodule at a time,
@@ -42,8 +110,37 @@ class StreamedCheckpointLoader:
         return handle
 
     def load_module_(self, module, prefix, device, dtype):
-        """Materializes `module`'s parameters from the checkpoint onto `device`."""
+        """Materializes `module`'s parameters from the checkpoint onto `device`.
+
+        TransposedLinear submodules (see its docstring) need their weight transposed
+        relative to what's actually stored in the checkpoint (nn.Linear's standard
+        (out_features, in_features)). That transpose happens right here, right after
+        the tensor is read off disk -- on host, outside any torch.compile'd region --
+        at the cost of paying it again on every load: this loader re-streams every
+        layer's weights fresh on every decode step, nothing is cached across calls."""
+        handled = set()
+        for sub_name, submodule in module.named_modules():
+            if not isinstance(submodule, TransposedLinear):
+                continue
+            sub_prefix = f"{prefix}.{sub_name}" if sub_name else prefix
+
+            weight_key = "weight" if not sub_name else f"{sub_name}.weight"
+            full_weight_name = f"{sub_prefix}.weight"
+            tensor = self._handle(self.weight_map[full_weight_name]).get_tensor(full_weight_name).to(dtype=dtype)
+            tensor = tensor.t().contiguous()  # (out_features, in_features) -> (in_features, out_features)
+            set_module_tensor_to_device(submodule, "weight", device, value=tensor)
+            handled.add(weight_key)
+
+            if submodule.bias is not None:
+                bias_key = "bias" if not sub_name else f"{sub_name}.bias"
+                full_bias_name = f"{sub_prefix}.bias"
+                bias_tensor = self._handle(self.weight_map[full_bias_name]).get_tensor(full_bias_name).to(dtype=dtype)
+                set_module_tensor_to_device(submodule, "bias", device, value=bias_tensor)
+                handled.add(bias_key)
+
         for name, _ in list(module.named_parameters(recurse=True)):
+            if name in handled:
+                continue
             full_name = f"{prefix}.{name}"
             tensor = self._handle(self.weight_map[full_name]).get_tensor(full_name).to(dtype=dtype)
             set_module_tensor_to_device(module, name, device, value=tensor)
@@ -439,6 +536,21 @@ def run_llama_gen_streamed_npu(
     with torch.device("meta"):
         model = AutoModelForCausalLM.from_config(config, torch_dtype=torch_dtype)
     model.eval()
+
+    # Replace each decoder layer's q/k/v/o_proj and gate/up/down_proj (all nn.Linear)
+    # with TransposedLinear, so their weight lands on the NPU pre-transposed instead of
+    # being read through F.linear's implicit transpose -- see TransposedLinear's
+    # docstring for the DRAM-bandwidth reason. Still on the meta device here;
+    # StreamedCheckpointLoader.load_module_ materializes (and transposes) the real
+    # weight per layer per decode step, same as everything else.
+    _replace_linear_with_transposed_(model.model.layers)
+
+    # Manual per-shape tile-size overrides (down_proj's heuristic-picked tile
+    # otherwise fragments into 32 separate N-tiles -- see
+    # configs/tile_overrides/llama2_7b.yaml for the measured numbers and how to
+    # add more). Only takes effect if TOGSIM_CONFIG also has
+    # codegen_mapping_strategy: external-then-heuristic.
+    apply_tile_overrides(TILE_OVERRIDE_YAML, TILE_OVERRIDE_JSON)
 
     # inv_freq is derived from config, not stored per-checkpoint. Build it fresh with real values
     # on CPU (torch.arange under the meta context above would give it a meta inv_freq too), then

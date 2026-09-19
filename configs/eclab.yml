@@ -18,7 +18,7 @@ icnt_freq_mhz: 800
 icnt_injection_ports_per_core: 8
 booksim_config_path: ../configs/booksim2_configs/fly_c8_m4.icnt
 
-pytorchsim_functional_mode: 0
+pytorchsim_functional_mode: 1
 pytorchsim_timing_mode: 1
 
 codegen_mapping_strategy: heuristic
