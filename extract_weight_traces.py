@@ -91,7 +91,7 @@ def main():
         description="Extract SSD trace rows whose addresses fall within merged weight ranges."
     )
     parser.add_argument(
-        "--trace_name",
+        "--trace-name",
         default=None,
         help="trace name",
     )
